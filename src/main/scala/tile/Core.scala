@@ -14,6 +14,7 @@ case object XLen extends Field[Int]
 trait CoreParams {
   val bootFreqHz: BigInt
   val useVM: Boolean
+  val useHype: Boolean
   val useUser: Boolean
   val useDebug: Boolean
   val useAtomics: Boolean

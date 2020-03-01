@@ -21,8 +21,15 @@ class MStatus extends Bundle {
 
   val dprv = UInt(width = PRV.SZ) // effective privilege for data accesses
   val prv = UInt(width = PRV.SZ) // not truly part of mstatus, but convenient
+  val v = Bool()
+  val mpv = Bool()
+  val mtl = Bool()
   val sd = Bool()
-  val zero2 = UInt(width = 27)
+  val zero2 = UInt(width = 23)
+  val mpv = Bool()
+  val gva = Bool()
+  val mbe = Bool()
+  val sbe = Bool()
   val sxl = UInt(width = 2)
   val uxl = UInt(width = 2)
   val sd_rv32 = Bool()
@@ -39,13 +46,31 @@ class MStatus extends Bundle {
   val vs = UInt(width = 2)
   val spp = UInt(width = 1)
   val mpie = Bool()
-  val hpie = Bool()
+  val ube = Bool()
   val spie = Bool()
   val upie = Bool()
   val mie = Bool()
   val hie = Bool()
   val sie = Bool()
   val uie = Bool()
+}
+
+class HStatus extends Bundle {
+  val zero6 = UInt(width = 44) 
+  val vsxl = UInt(width = 2)
+  val zero5 = UInt(width = 9)
+  val vtsr = Bool()
+  val zero4 = Bool()
+  val vtvm = Bool()
+  val zero3 = UInt(width = 2)
+  val vegein = UInt(width = 6)
+  val zero2 = UInt(width = 2)
+  val hu = Bool()
+  val spvp = Bool()
+  val spv = Bool()
+  val gva = Bool()
+  val vsbe = Bool()
+  val zero1 = UInt(width = 5)
 }
 
 class DCSR extends Bundle {
@@ -72,16 +97,17 @@ class MIP(implicit p: Parameters) extends CoreBundle()(p)
   val debug = Bool() // keep in sync with CSR.debugIntCause
   val zero1 = Bool()
   val rocc = Bool()
+  val sgeip = Bool()
   val meip = Bool()
-  val heip = Bool()
+  val vseip = Bool()
   val seip = Bool()
   val ueip = Bool()
   val mtip = Bool()
-  val htip = Bool()
+  val vstip = Bool()
   val stip = Bool()
   val utip = Bool()
   val msip = Bool()
-  val hsip = Bool()
+  val vssip = Bool()
   val ssip = Bool()
   val usip = Bool()
 }
@@ -108,8 +134,9 @@ object PRV
   val SZ = 2
   val U = 0
   val S = 1
-  val H = 2
   val M = 3
+  val VU = 0
+  val VS = 1
 }
 
 object CSR
@@ -207,12 +234,14 @@ class CSRFileIO(implicit p: Parameters) extends CoreBundle
 
   val status = new MStatus().asOutput
   val ptbr = new PTBR().asOutput
+  val vptbr = new PTBR().asOutput
   val evec = UInt(OUTPUT, vaddrBitsExtended)
   val exception = Bool(INPUT)
   val retire = UInt(INPUT, log2Up(1+retireWidth))
   val cause = UInt(INPUT, xLen)
   val pc = UInt(INPUT, vaddrBitsExtended)
   val tval = UInt(INPUT, vaddrBitsExtended)
+  val hval = UInt(INPUT, vaddrBitsExtended)
   val time = UInt(OUTPUT, xLen)
   val fcsr_rm = Bits(OUTPUT, FPConstants.RM_SZ)
   val fcsr_flags = Valid(Bits(width = FPConstants.FLAGS_SZ)).flip
@@ -309,16 +338,17 @@ class CSRFile(
     val sup = Wire(new MIP)
     sup.usip := false
     sup.ssip := Bool(usingVM)
-    sup.hsip := false
+    sup.vssip := Bool(usingHype)
     sup.msip := true
     sup.utip := false
     sup.stip := Bool(usingVM)
-    sup.htip := false
+    sup.vstip := Bool(usingHype)
     sup.mtip := true
     sup.ueip := false
     sup.seip := Bool(usingVM)
-    sup.heip := false
+    sup.vseip := Bool(usingHype)
     sup.meip := true
+    sup.sgeip := Bool(usingHype)
     sup.rocc := usingRoCC
     sup.zero1 := false
     sup.debug := false
@@ -355,8 +385,17 @@ class CSRFile(
 
   val reg_mie = Reg(UInt(width = xLen))
   val (reg_mideleg, read_mideleg) = {
-    val reg = Reg(UInt(xLen.W))
-    (reg, Mux(usingVM, reg & delegable_interrupts, 0.U))
+    if(usingHype)
+    {
+      val reset_mideleg = Wire(UInt(xLen.W))
+      reset_mideleg := 1 << 2 | 1 << 6 | 1 << 10 | 1 << 12  // delegates always vs-level interrupts past M-mode
+      val reg = Reg(init = reset_mideleg)
+      (reg, Mux(usingVM, reg & delegable_interrupts, 0.U))
+    }
+    else {
+      val reg = Reg(UInt(xLen.W))
+      (reg, Mux(usingVM, reg & delegable_interrupts, 0.U))
+    }
   }
   val (reg_medeleg, read_medeleg) = {
     val reg = Reg(UInt(xLen.W))
@@ -366,6 +405,8 @@ class CSRFile(
   val reg_mepc = Reg(UInt(width = vaddrBitsExtended))
   val reg_mcause = Reg(Bits(width = xLen))
   val reg_mtval = Reg(UInt(width = vaddrBitsExtended))
+  val reg_mtval2 = Reg(UInt(width = xLen))
+  val reg_mtinst = Reg(UInt(width = xLen))
   val reg_mscratch = Reg(Bits(width = xLen))
   val mtvecWidth = paddrBits min xLen
   val reg_mtvec = mtvecInit match {
@@ -382,6 +423,59 @@ class CSRFile(
     val reg = Reg(UInt(32.W))
     (reg, Mux(usingVM, reg & delegable_counters, 0.U))
   }
+  
+  val reset_hstatus = Wire(init=new HStatus().fromBits(0)) // initializes to zero
+  val reg_hstatus = Reg(init = reset_hstatus) // initializes reg with reset value 
+  val hs_delegable_interrupts = {
+    val hs_sup = Wire(new MIP)
+
+    hs_sup.vssip := Bool(usingHype)
+    hs_sup.vstip := Bool(usingHype)
+    hs_sup.vseip := Bool(usingHype)
+    hs_sup.lip foreach { _ := true }
+    hs_sup.asUInt 
+  }
+  val hs_delegable_exceptions = UInt(Seq(
+    Causes.misaligned_fetch,
+    Causes.fetch_access,
+    Causes.illegal_instruction,
+    Causes.breakpoint,
+    Causes.misaligned_load,
+    Causes.load_access,
+    Causes.misaligned_store,
+    Causes.store_access,
+    Causes.user_ecall,
+    Causes.fetch_page_fault,
+    Causes.load_page_fault,
+    Causes.store_page_fault).map(1 << _).sum)
+
+  val (reg_hideleg, read_hideleg) = {
+    val reg = Reg(UInt(xLen.W))
+    (reg, Mux(usingHype, reg & hs_delegable_interrupts, 0.U))
+  }
+  val (reg_hedeleg, read_hedeleg) = {
+    val reg = Reg(UInt(xLen.W))
+    (reg, Mux(usingHype, reg & hs_delegable_exceptions, 0.U))
+  }
+  val hs_delegable_counters = ((BigInt(1) << (nPerfCounters + CSR.firstHPM)) - 1).U
+  val (reg_hcounteren, read_hcounteren) = {
+    val reg = Reg(UInt(32.W))
+    (reg, Mux(usingHype, reg & hs_delegable_counters, 0.U))
+  }
+  val reg_hgatp = Reg(new PTBR)
+  val reg_htinst = Reg(UInt(xLen.W))
+  val reg_hvip = Reg(new MIP)
+  val reg_hgeip = Reg(UInt(xLen.W))
+  val reg_hgeie = Reg(UInt(xLen.W))
+  val reg_htval = Reg(UInt(width = vaddrBitsExtended))
+
+  val reg_vsstatus = Reg(init=new MStatus().fromBits(0)) // initializes to zero
+  val reg_vstvec = Reg(UInt(width = vaddrBits))
+  val reg_vsscratch = Reg(Bits(width = xLen))
+  val reg_vsepc = Reg(UInt(width = vaddrBitsExtended))
+  val reg_vscause = Reg(Bits(width = xLen))
+  val reg_vstval = Reg(UInt(width = vaddrBitsExtended))
+  val reg_vsatp = Reg(new PTBR)
 
   val reg_sepc = Reg(UInt(width = vaddrBitsExtended))
   val reg_scause = Reg(Bits(width = xLen))
@@ -411,6 +505,7 @@ class CSRFile(
   mip.meip := io.interrupts.meip
   // seip is the OR of reg_mip.seip and the actual line from the PLIC
   io.interrupts.seip.foreach { mip.seip := reg_mip.seip || _ }
+ // io.interrupts.vseip.foreach { mip.vseip := reg_hvip.vseip || _ } //added by Bruno, ainda falta 
   mip.rocc := io.rocc_interrupt
   val read_mip = mip.asUInt & supported_interrupts
   val high_interrupts = io.interrupts.buserror.map(_ << CSR.busErrorIntCause).getOrElse(0.U)
@@ -419,7 +514,8 @@ class CSRFile(
   val d_interrupts = io.interrupts.debug << CSR.debugIntCause
   val m_interrupts = Mux(reg_mstatus.prv <= PRV.S || reg_mstatus.mie, ~(~pending_interrupts | read_mideleg), UInt(0))
   val s_interrupts = Mux(reg_mstatus.prv < PRV.S || (reg_mstatus.prv === PRV.S && reg_mstatus.sie), pending_interrupts & read_mideleg, UInt(0))
-  val (anyInterrupt, whichInterrupt) = chooseInterrupt(Seq(s_interrupts, m_interrupts, d_interrupts))
+  val vs_interrupts = Mux((reg_mstatus.prv < PRV.VS && reg_mstatus.v) || (reg_mstatus.v && reg_mstatus.prv === PRV.VS && reg_vsstatus.sie), pending_interrupts & read_mideleg & read_hideleg, UInt(0))
+  val (anyInterrupt, whichInterrupt) = chooseInterrupt(Seq(vs_interrupts,s_interrupts, m_interrupts, d_interrupts))
   val interruptMSB = BigInt(1) << (xLen-1)
   val interruptCause = UInt(interruptMSB) + whichInterrupt
   io.interrupt := (anyInterrupt && !io.singleStep || reg_singleStepped) && !(reg_debug || io.status.cease)
@@ -438,10 +534,29 @@ class CSRFile(
     isaMaskString +
     "X" + // Custom extensions always present (e.g. CEASE instruction)
     (if (usingVM) "S" else "") +
+    (if (usingHype) "H" else "") +
     (if (usingUser) "U" else "")
   val isaMax = (BigInt(log2Ceil(xLen) - 4) << (xLen-2)) | isaStringToMask(isaString)
   val reg_misa = Reg(init=UInt(isaMax))
-  val read_mstatus = io.status.asUInt()(xLen-1,0)
+  val read_mstatus = {
+    val mstatus = Wire(new MStatus())
+    mstatus := io.status
+    when(reg_mstatus.v){
+      mstatus := io.status
+      mstatus.sd := reg_mstatus.sd
+      mstatus.uxl := reg_mstatus.uxl
+      mstatus.sd_rv32 := reg_mstatus.sd_rv32
+      mstatus.mxr := reg_mstatus.mxr
+      mstatus.sum := reg_mstatus.sum
+      mstatus.xs := reg_mstatus.xs
+      mstatus.fs := reg_mstatus.fs
+      mstatus.vs := reg_mstatus.vs
+      mstatus.spp := reg_mstatus.spp
+      mstatus.spie := reg_mstatus.spie
+      mstatus.sie := reg_mstatus.sie
+    }
+    mstatus.asUInt()(xLen-1,0)
+  }
   val read_mtvec = formTVec(reg_mtvec).padTo(xLen)
   val read_stvec = formTVec(reg_stvec).sextTo(xLen)
 
@@ -529,7 +644,19 @@ class CSRFile(
     read_sstatus.spp := io.status.spp
     read_sstatus.spie := io.status.spie
     read_sstatus.sie := io.status.sie
-
+    when(reg_mstatus.v){
+      read_sstatus.sd := reg_mstatus.sd
+      read_sstatus.uxl := reg_mstatus.uxl
+      read_sstatus.sd_rv32 := reg_mstatus.sd_rv32
+      read_sstatus.mxr := reg_mstatus.mxr
+      read_sstatus.sum := reg_mstatus.sum
+      read_sstatus.xs := reg_mstatus.xs
+      read_sstatus.fs := reg_mstatus.fs
+      read_sstatus.vs := reg_mstatus.vs
+      read_sstatus.spp := reg_mstatus.spp
+      read_sstatus.spie := reg_mstatus.spie
+      read_sstatus.sie := reg_mstatus.sie
+    }
     read_mapping += CSRs.sstatus -> (read_sstatus.asUInt())(xLen-1,0)
     read_mapping += CSRs.sip -> read_sip.asUInt
     read_mapping += CSRs.sie -> read_sie.asUInt
@@ -543,6 +670,50 @@ class CSRFile(
     read_mapping += CSRs.mideleg -> read_mideleg
     read_mapping += CSRs.medeleg -> read_medeleg
   }
+
+    val read_hie = reg_mie & read_mideleg
+    val read_hip = read_mip & read_mideleg
+    //val read_hvip = read_hip & read_hideleg
+    read_mapping += CSRs.hstatus -> reg_hstatus.asUInt()
+    read_mapping += CSRs.hedeleg -> read_medeleg
+    read_mapping += CSRs.hideleg -> read_mideleg
+    read_mapping += CSRs.hcounteren-> reg_hcounteren
+    read_mapping += CSRs.hgatp -> reg_hgatp.asUInt
+    read_mapping += CSRs.hip -> read_hip
+    read_mapping += CSRs.hie -> read_hie
+    read_mapping += CSRs.hvip -> reg_hvip.asUInt
+    read_mapping += CSRs.hgeie -> reg_hgeie
+    read_mapping += CSRs.hgeip -> reg_hgeip
+    read_mapping += CSRs.htval -> reg_htval.sextTo(xLen)
+
+    val read_vsie = (read_hie & read_hideleg) >> 1
+    val read_vsip = (read_hip & read_hideleg) >> 1
+    val read_vstvec = formTVec(reg_vstvec).sextTo(xLen)
+    val read_vsstatus = Wire(init = 0.U.asTypeOf(new MStatus))
+      read_vsstatus := reg_vsstatus
+      read_vsstatus.ube := reg_hstatus.vsbe
+    when(reg_mstatus.v){
+      read_vsstatus.sd := io.status.sd
+      read_vsstatus.uxl := io.status.uxl
+      read_vsstatus.sd_rv32 := io.status.sd_rv32
+      read_vsstatus.mxr := io.status.mxr
+      read_vsstatus.sum := io.status.sum
+      read_vsstatus.xs := io.status.xs
+      read_vsstatus.fs := io.status.fs
+      read_vsstatus.vs := io.status.vs
+      read_vsstatus.spp := io.status.spp
+      read_vsstatus.spie := io.status.spie
+      read_vsstatus.sie := io.status.sie
+    }
+    read_mapping += CSRs.vsstatus -> read_vsstatus.asUInt()
+    read_mapping += CSRs.vsip -> read_vsip.asUInt
+    read_mapping += CSRs.vsie -> read_vsie.asUInt
+    read_mapping += CSRs.vsscratch -> reg_vsscratch
+    read_mapping += CSRs.vscause -> reg_vscause
+    read_mapping += CSRs.vstval -> reg_vstval.sextTo(xLen)
+    read_mapping += CSRs.vsatp -> reg_vsatp.asUInt
+    read_mapping += CSRs.vsepc -> readEPC(reg_vsepc).sextTo(xLen)
+    read_mapping += CSRs.vstvec -> read_vstvec
 
   val pmpCfgPerCSR = xLen / new PMPConfig().getWidth
   def pmpCfgIndex(i: Int) = (xLen / 32) * (i / pmpCfgPerCSR)
@@ -579,8 +750,9 @@ class CSRFile(
     usingDebug.option(           DRET->        List(N,N,Y,N,N,N)) ++
     coreParams.haveCFlush.option(CFLUSH_D_L1-> List(N,N,N,N,N,N)) ++
     usingVM.option(              SRET->        List(N,N,Y,N,N,N)) ++
-    usingVM.option(              SFENCE_VMA->  List(N,N,N,N,N,Y))
-
+    usingVM.option(             SFENCE_VMA->  List(N,N,N,N,N,Y))++
+    usingHype.option(            HFENCE_VVMA->  List(N,N,N,N,N,Y)) ++
+    usingHype.option(             HFENCE_GVMA->  List(N,N,N,N,N,Y))
   val insn_call :: insn_break :: insn_ret :: insn_cease :: insn_wfi :: insn_sfence :: Nil =
     DecodeLogic(io.rw.addr << 20, decode_table(0)._2.map(x=>X), decode_table).map(system_insn && _.asBool)
 
@@ -591,30 +763,47 @@ class CSRFile(
     val _ :: is_break :: is_ret :: _ :: is_wfi :: is_sfence :: Nil =
       DecodeLogic(io_dec.csr << 20, decode_table(0)._2.map(x=>X), decode_table).map(_.asBool)
 
-    val allow_wfi = Bool(!usingVM) || reg_mstatus.prv > PRV.S || !reg_mstatus.tw
-    val allow_sfence_vma = Bool(!usingVM) || reg_mstatus.prv > PRV.S || !reg_mstatus.tvm
-    val allow_sret = Bool(!usingVM) || reg_mstatus.prv > PRV.S || !reg_mstatus.tsr
+    val allow_wfi = Bool(!usingVM) || reg_mstatus.prv > PRV.S || !reg_mstatus.tw || (Bool(usingHype) && !reg_mstatus.v)
+    val allow_sfence_vma = Bool(!usingVM || !usingHype) || reg_mstatus.prv > PRV.S || 
+                            (Bool(usingVM) && !reg_mstatus.tvm && !reg_mstatus.v)  ||
+                            (Bool(usingHype) && reg_mstatus.v && !reg_hstatus.vtsr)
+    //allow_h_load_store = Bool(!usingHype) || (reg_mstatus.prev === PRV.VU &&  !reg_hstatus.hu)
+    val allow_hfence_vvma = Bool(!usingHype) || reg_mstatus.prv > PRV.S || !reg_mstatus.tvm 
+    val allow_hfence_gvma = Bool(!usingHype) || reg_mstatus.prv >= PRV.S
+    val allow_sret = Bool(!usingVM) || reg_mstatus.prv > PRV.S || (!reg_mstatus.v && !reg_mstatus.tsr) || (reg_mstatus.v && !reg_hstatus.vtsr)
     val counter_addr = io_dec.csr(log2Ceil(read_mcounteren.getWidth)-1, 0)
     val allow_counter = (reg_mstatus.prv > PRV.S || read_mcounteren(counter_addr)) &&
       (!usingVM || reg_mstatus.prv >= PRV.S || read_scounteren(counter_addr))
-    io_dec.fp_illegal := io.status.fs === 0 || !reg_misa('f'-'a')
+      //need to add hypervisor counters here
+    io_dec.fp_illegal := (reg_mstatus.v && io.status.fs === 0 && reg_vsstatus.fs === 0) ||
+                         (!reg_mstatus.v && io.status.fs === 0) ||
+                          !reg_misa('f'-'a') 
     io_dec.vector_illegal := io.status.vs === 0 || !reg_misa('v'-'a')
     io_dec.fp_csr := decodeFast(fp_csrs.keys.toList)
     io_dec.rocc_illegal := io.status.xs === 0 || !reg_misa('x'-'a')
     io_dec.read_illegal := reg_mstatus.prv < io_dec.csr(9,8) ||
       !decodeAny(read_mapping) ||
-      io_dec.csr === CSRs.satp && !allow_sfence_vma ||
+      ((io_dec.csr === CSRs.satp || io_dec.csr === CSRs.vsatp)   && !allow_sfence_vma )||
+      (io_dec.csr === CSRs.vsatp && !allow_hfence_vvma )||
+      (io_dec.csr === CSRs.hgatp && !allow_hfence_gvma )||
       (io_dec.csr.inRange(CSR.firstCtr, CSR.firstCtr + CSR.nCtr) || io_dec.csr.inRange(CSR.firstCtrH, CSR.firstCtrH + CSR.nCtr)) && !allow_counter ||
       decodeFast(debug_csrs.keys.toList) && !reg_debug ||
       decodeFast(vector_csrs.keys.toList) && io_dec.vector_illegal ||
       io_dec.fp_csr && io_dec.fp_illegal
-    io_dec.write_illegal := io_dec.csr(11,10).andR
-    io_dec.write_flush := !(io_dec.csr >= CSRs.mscratch && io_dec.csr <= CSRs.mtval || io_dec.csr >= CSRs.sscratch && io_dec.csr <= CSRs.stval)
+    io_dec.write_illegal := io_dec.csr(11,10).andR && !(io_dec.csr === CSRs.hgatp) ||
+                            (io_dec.csr(11,10).andR && io_dec.csr === CSRs.hgatp && !allow_hfence_vvma) 
+
+
+    io_dec.write_flush := !(io_dec.csr >= CSRs.mscratch && io_dec.csr <= CSRs.mtval || !reg_mstatus.v && io_dec.csr >= CSRs.sscratch && io_dec.csr <= CSRs.stval || 
+                          reg_mstatus.v && io_dec.csr >= CSRs.vsscratch && io_dec.csr <= CSRs.vstval )
     io_dec.system_illegal := reg_mstatus.prv < io_dec.csr(9,8) ||
       is_wfi && !allow_wfi ||
       is_ret && !allow_sret ||
       is_ret && io_dec.csr(10) && !reg_debug ||
-      is_sfence && !allow_sfence_vma
+      is_fence && !allow_sfence_vma || 
+      is_fence && !allow_hfence_vvma && io_dec.csr === CSRs.vsatp || 
+      is_fence && !allow_hfence_gvma && io_dec.csr === CSRs.hgatp
+
   }
 
   val cause =
@@ -627,13 +816,14 @@ class CSRFile(
   val trapToDebug = Bool(usingDebug) && (reg_singleStepped || causeIsDebugInt || causeIsDebugTrigger || causeIsDebugBreak || reg_debug)
   val debugTVec = Mux(reg_debug, Mux(insn_break, UInt(0x800), UInt(0x808)), UInt(0x800))
   val delegate = Bool(usingVM) && reg_mstatus.prv <= PRV.S && Mux(cause(xLen-1), read_mideleg(cause_lsbs), read_medeleg(cause_lsbs))
+  val delegateVS = Bool(usingHype) && reg_mstatus.prv <= PRV.VS && reg_mstatus.v && Mux(cause(xLen-1), read_hideleg(cause_lsbs), read_hedeleg(cause_lsbs))
   def mtvecBaseAlign = 2
   def mtvecInterruptAlign = {
     require(reg_mip.getWidth <= xLen)
     log2Ceil(xLen)
   }
   val notDebugTVec = {
-    val base = Mux(delegate, read_stvec, read_mtvec)
+    val base = Mux(delegate, Mux(delegateVS,read_vstvec,read_stvec), read_mtvec)
     val interruptOffset = cause(mtvecInterruptAlign-1, 0) << mtvecBaseAlign
     val interruptVec = Cat(base >> (mtvecInterruptAlign + mtvecBaseAlign), interruptOffset)
     val doVector = base(0) && cause(cause.getWidth-1) && (cause_lsbs >> mtvecInterruptAlign) === 0
@@ -641,7 +831,8 @@ class CSRFile(
   }
   val tvec = Mux(trapToDebug, debugTVec, notDebugTVec)
   io.evec := tvec
-  io.ptbr := reg_satp
+  io.ptbr := Mux(usingHype,Mux(reg_mstatus.v,reg_vsatp,reg_satp),reg_satp)
+  io.vptbr := reg_hgatp
   io.eret := insn_call || insn_break || insn_ret
   io.singleStep := reg_dcsr.step && !reg_debug
   io.status := reg_mstatus
@@ -653,6 +844,15 @@ class CSRFile(
   io.status.dprv := Reg(next = Mux(reg_mstatus.mprv && !reg_debug, reg_mstatus.mpp, reg_mstatus.prv))
   if (xLen == 32)
     io.status.sd_rv32 := io.status.sd
+  when(reg_mstatus.v){
+    io.status.fs := reg_vsstatus.fs
+    io.status.xs := reg_vsstatus.xs
+    io.status.sum := reg_vsstatus.sum
+    io.status.mxr := reg_vsstatus.mxr
+    io.status.spp:= reg_vsstatus.spp
+    io.status.spie := reg_vsstatus.spie
+    io.status.sie := reg_vsstatus.sie
+  }
 
   val exception = insn_call || insn_break || io.exception
   assert(PopCount(insn_ret :: insn_call :: insn_break :: io.exception :: Nil) <= 1, "these conditions must be mutually exclusive")
@@ -677,8 +877,18 @@ class CSRFile(
         reg_dcsr.cause := Mux(reg_singleStepped, 4, Mux(causeIsDebugInt, 3, Mux[UInt](causeIsDebugTrigger, 2, 1)))
         reg_dcsr.prv := trimPrivilege(reg_mstatus.prv)
         new_prv := PRV.M
-      }
+      }                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
     }.elsewhen (delegate) {
+      if(usingHype)
+      {
+        reg_mstatus.v := false
+        reg_hstatus.spvp := Mux(reg_mstatus.v,(~reg_mstatus.prv(1) & reg_mstatus.prv(0)),reg_hstatus.spvp)
+        //reg_hstatus.gva := hstatus.spv
+        //reg_hstatus.htval := hstatus.spp
+        //reg_hstatus.htinst := hstatus.spp
+        reg_hstatus.spv  := reg_mstatus.v
+        reg_mstatus.spp := (~reg_mstatus.prv(1) & reg_mstatus.prv(0))
+      }
       reg_sepc := epc
       reg_scause := cause
       xcause_dest := sCause
@@ -687,11 +897,31 @@ class CSRFile(
       reg_mstatus.spp := reg_mstatus.prv
       reg_mstatus.sie := false
       new_prv := PRV.S
+    }.elsewhen (delegateVS) {
+
+      reg_vsstatus.spp := reg_mstatus.prv(0)
+      reg_vsepc := epc
+      reg_vscause := cause
+      xcause_dest := sCause
+      reg_vstval := io.tval
+      reg_vsstatus.spie := reg_vsstatus.sie
+      reg_mstatus.sie := false
+      reg_mstatus.v := true
+      new_prv := PRV.VS
+
     }.otherwise {
+
       reg_mepc := epc
       reg_mcause := cause
       xcause_dest := mCause
       reg_mtval := io.tval
+      if(usingHype){
+        reg_mstatus.v := false
+        reg_mstatus.mpv := reg_mstatus.v
+        //reg_mstatus.gva := 
+        //reg_mstatus.mtval2 := 
+        //reg_mstatus.mtinst := 
+      }
       reg_mstatus.mpie := reg_mstatus.mie
       reg_mstatus.mpp := trimPrivilege(reg_mstatus.prv)
       reg_mstatus.mie := false
@@ -705,6 +935,7 @@ class CSRFile(
     cover(en && !delegate, s"INTERRUPT_M_$i")
     cover(en && delegable && delegate, s"INTERRUPT_S_$i")
   }
+  // faltam cenas aqui tbm 
   for (i <- 0 until xLen) {
     val supported_exceptions: BigInt = 0x8fe |
       (if (usingCompressed && !coreParams.misaWritable) 0 else 1) |
@@ -720,11 +951,25 @@ class CSRFile(
 
   when (insn_ret) {
     when (Bool(usingVM) && !io.rw.addr(9)) {
-      reg_mstatus.sie := reg_mstatus.spie
-      reg_mstatus.spie := true
-      reg_mstatus.spp := PRV.U
-      new_prv := reg_mstatus.spp
-      io.evec := readEPC(reg_sepc)
+      when(!reg_mstatus.v){
+        reg_mstatus.sie := reg_mstatus.spie 
+        reg_mstatus.spie := true
+        reg_hstatus.spv := false
+        reg_mstatus.spp := false
+          //reg_hstatus.sp2v := false
+         // reg_hstatus.sp2p := false
+        new_prv := reg_mstatus.spp // falta isto
+        reg_mstatus.v := reg_hstatus.spv
+        io.evec := readEPC(reg_sepc)
+      }
+      .otherwise {
+        reg_vsstatus.sie := reg_vsstatus.spie
+        reg_vsstatus.spie := true
+        reg_vsstatus.spp := false  
+        new_prv := reg_mstatus.spp // falta isto 
+        reg_mstatus.v := reg_mstatus.mpv
+        io.evec := readEPC(reg_vsepc)
+      }
     }.elsewhen (Bool(usingDebug) && io.rw.addr(10)) {
       new_prv := reg_dcsr.prv
       reg_debug := false
@@ -732,7 +977,11 @@ class CSRFile(
     }.otherwise {
       reg_mstatus.mie := reg_mstatus.mpie
       reg_mstatus.mpie := true
-      reg_mstatus.mpp := legalizePrivilege(PRV.U)
+      reg_mstatus.mpp := Fill(2,PRV.U)
+      if(usingHype)
+      {
+         reg_mstatus.mpv := false
+      }
       new_prv := reg_mstatus.mpp
       io.evec := readEPC(reg_mepc)
     }
@@ -771,6 +1020,11 @@ class CSRFile(
   if (coreParams.haveFSDirty) {
     when (set_fs_dirty) {
       assert(reg_mstatus.fs > 0)
+      if(usingHype){
+        when (reg_mstatus.v){
+          reg_vsstatus.fs := 3
+        }
+      }
       reg_mstatus.fs := 3
     }
   }
@@ -913,6 +1167,80 @@ class CSRFile(
       when (decoded_addr(CSRs.medeleg))  { reg_medeleg := wdata }
       when (decoded_addr(CSRs.scounteren)) { reg_scounteren := wdata }
     }
+
+    if (usingHype) {
+       when (decoded_addr(CSRs.hstatus)) {
+         val new_hstatus = new HStatus().fromBits(wdata)
+         // reg_hstatus.sprv := new_hstatus.sprv
+          reg_hstatus.vsbe := new_hstatus.vsbe
+          //reg_hstatus.sstl := new_hstatus.stl
+          reg_hstatus.spv := new_hstatus.spv
+          reg_hstatus.vtvm := new_hstatus.vtvm
+          reg_hstatus.vtsr := new_hstatus.vtsr
+
+      }
+      when (decoded_addr(CSRs.hideleg))  { reg_hideleg := wdata }
+      when (decoded_addr(CSRs.hedeleg))  { reg_hedeleg := wdata }
+      when (decoded_addr(CSRs.hgatp)) {
+        val new_hgatp = new PTBR().fromBits(wdata)
+        val valid_modes = 0 +: (minPgLevels to pgLevels).map(new_hgatp.pgLevelsToMode(_))
+        when (new_hgatp.mode.isOneOf(valid_modes.map(_.U))) {
+          reg_hgatp.mode := new_hgatp.mode & valid_modes.reduce(_|_)
+          reg_hgatp.ppn := new_hgatp.ppn(ppnBits-1,0)
+          if (asIdBits > 0) reg_hgatp.asid := new_hgatp.asid(asIdBits-1,0)
+        }
+      
+      }
+      when(decoded_addr(CSRs.hip)){
+        val new_hip = new MIP().fromBits((read_mip & ~read_mideleg) | (wdata & read_mideleg))
+        reg_mip.vssip := new_hip.vssip
+      }
+      when(decoded_addr(CSRs.hie)){reg_mie := (reg_mie & ~read_mideleg) | (wdata & read_mideleg)}
+      when(decoded_addr(CSRs.hvip)){
+        val new_hvip = new MIP().fromBits((reg_hvip.asUInt & ~read_hideleg) | (wdata & read_mideleg & read_hideleg))
+        reg_hvip.vssip := new_hvip.vssip
+        reg_hvip.vstip := new_hvip.vstip
+        reg_hvip.vseip := new_hvip.vseip
+      }
+      when (decoded_addr(CSRs.hgeie))  { reg_hgeie := wdata & (~ 1.U)}
+      when (decoded_addr(CSRs.hcounteren)) { reg_hcounteren := wdata }
+      when (decoded_addr(CSRs.htval))    { reg_vstval := wdata(vaddrBitsExtended-1,0) }
+      when (decoded_addr(CSRs.vsstatus)) {
+          val new_vsstatus = new MStatus().fromBits(wdata)
+          reg_vsstatus.sie := new_vsstatus.sie
+          reg_vsstatus.spie := new_vsstatus.spie
+
+          reg_vsstatus.mxr := new_vsstatus.mxr
+          reg_vsstatus.sum := new_vsstatus.sum
+          reg_vsstatus.spp := new_vsstatus.spp
+          reg_vsstatus.sd := new_vsstatus.sd
+          if (usingHype || usingFPU || usingVector) reg_vsstatus.fs := formFS(new_vsstatus.fs)
+          if (usingRoCC) reg_vsstatus.xs := Fill(2, new_vsstatus.xs.orR)
+      }
+
+      when (decoded_addr(CSRs.vsip)) {
+        val new_vsip = new MIP().fromBits((read_hip  & ~read_hideleg )| (wdata & read_mideleg & ~read_hideleg))
+        reg_mip.vssip := new_vsip.vssip
+        reg_mip.vstip := new_vsip.vstip
+        reg_mip.vseip := new_vsip.vseip
+      }
+      when (decoded_addr(CSRs.vsatp)) {
+        val new_vsatp = new PTBR().fromBits(wdata)
+        val valid_modes = 0 +: (minPgLevels to pgLevels).map(new_vsatp.pgLevelsToMode(_))
+        when (new_vsatp.mode.isOneOf(valid_modes.map(_.U))) {
+          reg_vsatp.mode := new_vsatp.mode & valid_modes.reduce(_|_)
+          reg_vsatp.ppn := new_vsatp.ppn(ppnBits-1,0)
+          if (asIdBits > 0) reg_vsatp.asid := new_vsatp.asid(asIdBits-1,0)
+        }
+      }
+      when (decoded_addr(CSRs.vsie))      { reg_mie := (reg_mie & ~read_mideleg & ~read_hideleg) | (wdata & read_mideleg & ~read_hideleg) }
+      when (decoded_addr(CSRs.vsscratch)) { reg_vsscratch := wdata }
+      when (decoded_addr(CSRs.vsepc))     { reg_vsepc := formEPC(wdata) }
+      when (decoded_addr(CSRs.vstvec))    { reg_vstvec := wdata }
+      when (decoded_addr(CSRs.vscause))   { reg_vscause := wdata & UInt((BigInt(1) << (xLen-1)) + 31) /* only implement 5 LSBs and MSB */ }
+      when (decoded_addr(CSRs.vstval))    { reg_vstval := wdata(vaddrBitsExtended-1,0) }
+    }
+
     if (usingUser) {
       when (decoded_addr(CSRs.mcounteren)) { reg_mcounteren := wdata }
     }
@@ -1029,8 +1357,8 @@ class CSRFile(
 
   def chooseInterrupt(masksIn: Seq[UInt]): (Bool, UInt) = {
     val nonstandard = supported_interrupts.getWidth-1 to 12 by -1
-    // MEI, MSI, MTI, SEI, SSI, STI, UEI, USI, UTI
-    val standard = Seq(11, 3, 7, 9, 1, 5, 8, 0, 4)
+    // MEI, MSI, MTI,  SEI, SSI, STI, VSEI, VSSI, VSTI, UEI, USI, UTI
+    val standard = Seq(11, 3, 7, 9, 1, 5, 10, 2, 6, 8, 0, 4)
     val priority = nonstandard ++ standard
     val masks = masksIn.reverse
     val any = masks.flatMap(m => priority.filter(_ < m.getWidth).map(i => m(i))).reduce(_||_)
@@ -1043,7 +1371,7 @@ class CSRFile(
   }
 
   def legalizePrivilege(priv: UInt): UInt =
-    if (usingVM) Mux(priv === PRV.H, PRV.U, priv)
+    if (usingVM) Mux(priv === PRV.S, PRV.U, priv)
     else if (usingUser) Fill(2, priv(0))
     else PRV.M
 

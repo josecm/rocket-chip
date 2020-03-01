@@ -18,6 +18,7 @@ case class RocketCoreParams(
   bootFreqHz: BigInt = 0,
   useVM: Boolean = true,
   useUser: Boolean = false,
+  useHype: Boolean = false,
   useDebug: Boolean = true,
   useAtomics: Boolean = true,
   useAtomicsOnlyForIO: Boolean = false,
@@ -172,6 +173,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     (rocketParams.useSCIE.option(new SCIEDecode)) ++:
     (if (xLen == 32) new I32Decode else new I64Decode) +:
     (usingVM.option(new SDecode)) ++:
+    (usingHype.option(new HDecode)) ++:
     (usingDebug.option(new DebugDecode)) ++:
     Seq(new FenceIDecode(tile.dcache.flushOnFenceI)) ++:
     coreParams.haveCFlush.option(new CFlushDecode(tile.dcache.canSupportCFlushLine)) ++:
