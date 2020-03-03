@@ -505,7 +505,7 @@ class CSRFile(
   mip.meip := io.interrupts.meip
   // seip is the OR of reg_mip.seip and the actual line from the PLIC
   io.interrupts.seip.foreach { mip.seip := reg_mip.seip || _ }
- // io.interrupts.vseip.foreach { mip.vseip := reg_hvip.vseip || _ } //added by Bruno, ainda falta 
+ // io.interrupts.vseip.foreach { mip.vseip := reg_hvip.vseip || _ } 
   mip.rocc := io.rocc_interrupt
   val read_mip = mip.asUInt & supported_interrupts
   val high_interrupts = io.interrupts.buserror.map(_ << CSR.busErrorIntCause).getOrElse(0.U)
@@ -538,25 +538,7 @@ class CSRFile(
     (if (usingUser) "U" else "")
   val isaMax = (BigInt(log2Ceil(xLen) - 4) << (xLen-2)) | isaStringToMask(isaString)
   val reg_misa = Reg(init=UInt(isaMax))
-  val read_mstatus = {
-    val mstatus = Wire(new MStatus())
-    mstatus := io.status
-    when(reg_mstatus.v){
-      mstatus := io.status
-      mstatus.sd := reg_mstatus.sd
-      mstatus.uxl := reg_mstatus.uxl
-      mstatus.sd_rv32 := reg_mstatus.sd_rv32
-      mstatus.mxr := reg_mstatus.mxr
-      mstatus.sum := reg_mstatus.sum
-      mstatus.xs := reg_mstatus.xs
-      mstatus.fs := reg_mstatus.fs
-      mstatus.vs := reg_mstatus.vs
-      mstatus.spp := reg_mstatus.spp
-      mstatus.spie := reg_mstatus.spie
-      mstatus.sie := reg_mstatus.sie
-    }
-    mstatus.asUInt()(xLen-1,0)
-  }
+  val read_mstatus = io.status.asUInt()(xLen-1,0)
   val read_mtvec = formTVec(reg_mtvec).padTo(xLen)
   val read_stvec = formTVec(reg_stvec).sextTo(xLen)
 
@@ -644,19 +626,6 @@ class CSRFile(
     read_sstatus.spp := io.status.spp
     read_sstatus.spie := io.status.spie
     read_sstatus.sie := io.status.sie
-    when(reg_mstatus.v){
-      read_sstatus.sd := reg_mstatus.sd
-      read_sstatus.uxl := reg_mstatus.uxl
-      read_sstatus.sd_rv32 := reg_mstatus.sd_rv32
-      read_sstatus.mxr := reg_mstatus.mxr
-      read_sstatus.sum := reg_mstatus.sum
-      read_sstatus.xs := reg_mstatus.xs
-      read_sstatus.fs := reg_mstatus.fs
-      read_sstatus.vs := reg_mstatus.vs
-      read_sstatus.spp := reg_mstatus.spp
-      read_sstatus.spie := reg_mstatus.spie
-      read_sstatus.sie := reg_mstatus.sie
-    }
     read_mapping += CSRs.sstatus -> (read_sstatus.asUInt())(xLen-1,0)
     read_mapping += CSRs.sip -> read_sip.asUInt
     read_mapping += CSRs.sie -> read_sie.asUInt
@@ -689,23 +658,7 @@ class CSRFile(
     val read_vsie = (read_hie & read_hideleg) >> 1
     val read_vsip = (read_hip & read_hideleg) >> 1
     val read_vstvec = formTVec(reg_vstvec).sextTo(xLen)
-    val read_vsstatus = Wire(init = 0.U.asTypeOf(new MStatus))
-      read_vsstatus := reg_vsstatus
-      read_vsstatus.ube := reg_hstatus.vsbe
-    when(reg_mstatus.v){
-      read_vsstatus.sd := io.status.sd
-      read_vsstatus.uxl := io.status.uxl
-      read_vsstatus.sd_rv32 := io.status.sd_rv32
-      read_vsstatus.mxr := io.status.mxr
-      read_vsstatus.sum := io.status.sum
-      read_vsstatus.xs := io.status.xs
-      read_vsstatus.fs := io.status.fs
-      read_vsstatus.vs := io.status.vs
-      read_vsstatus.spp := io.status.spp
-      read_vsstatus.spie := io.status.spie
-      read_vsstatus.sie := io.status.sie
-    }
-    read_mapping += CSRs.vsstatus -> read_vsstatus.asUInt()
+    read_mapping += CSRs.vsstatus -> reg_vsstatus.asUInt()
     read_mapping += CSRs.vsip -> read_vsip.asUInt
     read_mapping += CSRs.vsie -> read_vsie.asUInt
     read_mapping += CSRs.vsscratch -> reg_vsscratch
@@ -966,7 +919,7 @@ class CSRFile(
         reg_vsstatus.sie := reg_vsstatus.spie
         reg_vsstatus.spie := true
         reg_vsstatus.spp := false  
-        new_prv := reg_mstatus.spp // falta isto 
+        new_prv := reg_mstatus.spp // falta isto
         reg_mstatus.v := reg_mstatus.mpv
         io.evec := readEPC(reg_vsepc)
       }
