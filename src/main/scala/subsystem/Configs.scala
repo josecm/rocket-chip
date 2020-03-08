@@ -383,3 +383,9 @@ class WithScratchpadsOnly extends Config((site, here, up) => {
         scratch = Some(0x80000000L))))
   }
 })
+
+class WithHyp extends Config((site, here, up)=> {
+    case RocketTilesKey => up(RocketTilesKey, site) map { r =>
+        r.copy(core = r.core.copy(useHype = true)) 
+    }
+})

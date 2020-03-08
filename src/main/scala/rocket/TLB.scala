@@ -18,6 +18,8 @@ import chisel3.internal.sourceinfo.SourceInfo
 
 case object PgLevels extends Field[Int](2)
 case object ASIdBits extends Field[Int](0)
+case object VMIDBits extends Field[Int](0)
+
 
 class SFenceReq(implicit p: Parameters) extends CoreBundle()(p) {
   val rs1 = Bool()

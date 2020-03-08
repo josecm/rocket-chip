@@ -37,7 +37,7 @@ trait HasNonDiplomaticTileParameters {
   def tileParams: TileParams = p(TileKey)
 
   def usingVM: Boolean = tileParams.core.useVM
-  def usingHype: Boolean = tileParams.core.useHype
+  def usingHype: Boolean = usingVM && tileParams.core.useHype
   def usingUser: Boolean = tileParams.core.useUser || usingVM
   def usingDebug: Boolean = tileParams.core.useDebug
   def usingRoCC: Boolean = !p(BuildRoCC).isEmpty
@@ -58,6 +58,7 @@ trait HasNonDiplomaticTileParameters {
     res
   }
   def asIdBits: Int = p(ASIdBits)
+  def vmIdBits: Int = p(VMIDBits)
   def maxPAddrBits: Int = xLen match { case 32 => 34; case 64 => 56 }
 
   def hartId: Int = tileParams.hartId
@@ -80,7 +81,8 @@ trait HasNonDiplomaticTileParameters {
     val d = if (tileParams.core.fpu.nonEmpty && tileParams.core.fpu.get.fLen > 32) "d" else ""
     val c = if (tileParams.core.useCompressed) "c" else ""
     val v = if (tileParams.core.useVector) "v" else ""
-    s"rv${p(XLen)}$ie$m$a$f$d$c$v"
+    val h = if (tileParams.core.useHype) "h" else ""
+    s"rv${p(XLen)}$ie$m$a$f$d$c$v$h"
   }
 
   def tileProperties: PropertyMap = {
