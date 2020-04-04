@@ -325,9 +325,9 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     (csr.io.interrupt, csr.io.interrupt_cause),
     (bpu.io.debug_if,  UInt(CSR.debugTriggerCause)),
     (bpu.io.xcpt_if,   UInt(Causes.breakpoint)),
-    (id_xcpt0.pf.inst, UInt(Causes.fetch_page_fault)),
+    (id_xcpt0.pf.inst, Mux(id_xcpt0.pf.v, UInt(Causes.fetch_guest_page_fault), UInt(Causes.fetch_page_fault))),
     (id_xcpt0.ae.inst, UInt(Causes.fetch_access)),
-    (id_xcpt1.pf.inst, UInt(Causes.fetch_page_fault)),
+    (id_xcpt1.pf.inst, Mux(id_xcpt1.pf.v, UInt(Causes.fetch_guest_page_fault), UInt(Causes.fetch_page_fault))),
     (id_xcpt1.ae.inst, UInt(Causes.fetch_access)),
     (id_illegal_insn,  UInt(Causes.illegal_instruction))))
 
@@ -605,8 +605,8 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     (wb_reg_xcpt,  wb_reg_cause),
     (wb_reg_valid && wb_ctrl.mem && io.dmem.s2_xcpt.ma.st, UInt(Causes.misaligned_store)),
     (wb_reg_valid && wb_ctrl.mem && io.dmem.s2_xcpt.ma.ld, UInt(Causes.misaligned_load)),
-    (wb_reg_valid && wb_ctrl.mem && io.dmem.s2_xcpt.pf.st, UInt(Causes.store_page_fault)),
-    (wb_reg_valid && wb_ctrl.mem && io.dmem.s2_xcpt.pf.ld, UInt(Causes.load_page_fault)),
+    (wb_reg_valid && wb_ctrl.mem && io.dmem.s2_xcpt.pf.st, Mux(io.dmem.s2_xcpt.pf.v, UInt(Causes.store_guest_page_fault), UInt(Causes.store_page_fault))),
+    (wb_reg_valid && wb_ctrl.mem && io.dmem.s2_xcpt.pf.ld, Mux(io.dmem.s2_xcpt.pf.v, UInt(Causes.load_guest_page_fault), UInt(Causes.load_page_fault))),
     (wb_reg_valid && wb_ctrl.mem && io.dmem.s2_xcpt.ae.st, UInt(Causes.store_access)),
     (wb_reg_valid && wb_ctrl.mem && io.dmem.s2_xcpt.ae.ld, UInt(Causes.load_access))
   ))
@@ -688,6 +688,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     Causes.load_page_fault, Causes.store_page_fault, Causes.fetch_page_fault)
   csr.io.tval := Mux(tval_valid, encodeVirtualAddress(wb_reg_wdata, wb_reg_wdata), 0.U)
   io.ptw.ptbr := csr.io.ptbr
+  io.ptw.vptbr := csr.io.vptbr
   (io.ptw.customCSRs.csrs zip csr.io.customCSRs).map { case (lhs, rhs) => lhs := rhs }
   io.ptw.status := csr.io.status
   io.ptw.pmp := csr.io.pmp

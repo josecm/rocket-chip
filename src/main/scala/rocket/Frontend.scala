@@ -24,6 +24,7 @@ class FrontendReq(implicit p: Parameters) extends CoreBundle()(p) {
 class FrontendExceptions extends Bundle {
   val pf = new Bundle {
     val inst = Bool()
+    val v = Bool()
   }
   val ae = new Bundle {
     val inst = Bool()

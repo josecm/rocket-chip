@@ -126,6 +126,7 @@ class HellaCacheResp(implicit p: Parameters) extends CoreBundle()(p)
 class AlignmentExceptions extends Bundle {
   val ld = Bool()
   val st = Bool()
+  val v = Bool()
 }
 
 class HellaCacheExceptions extends Bundle {
