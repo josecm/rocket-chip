@@ -521,7 +521,7 @@ class CSRFile(
   val pending_interrupts = high_interrupts | (read_mip & reg_mie)
   val d_interrupts = io.interrupts.debug << CSR.debugIntCause
   val m_interrupts = Mux(reg_mstatus.prv <= PRV.S || reg_mstatus.mie, ~(~pending_interrupts | read_mideleg), UInt(0))
-  val s_interrupts = Mux(reg_mstatus.prv < PRV.S || (reg_mstatus.prv === PRV.S && reg_mstatus.sie), pending_interrupts & read_mideleg, UInt(0))
+  val s_interrupts = Mux(reg_mstatus.prv < PRV.S || reg_mstatus.v || (reg_mstatus.prv === PRV.S && reg_mstatus.sie), pending_interrupts & read_mideleg & ~read_hideleg, UInt(0))
   val vs_interrupts = Mux(reg_mstatus.v && (reg_mstatus.prv < PRV.S || reg_mstatus.prv === PRV.S && reg_vsstatus.sie), pending_interrupts & read_hideleg, UInt(0))
   val (anyInterrupt, whichInterrupt) = chooseInterrupt(Seq(vs_interrupts, s_interrupts, m_interrupts, d_interrupts))
   val interruptMSB = BigInt(1) << (xLen-1)
