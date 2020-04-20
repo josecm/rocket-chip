@@ -430,11 +430,13 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     }
   }
 
-  when(mem_resp_valid & !traverse & do_both_stages) {
+  when(Bool(usingHype) && mem_resp_valid && !traverse) {
     
-    aux_pte := pte
+    when(stage2){
+        aux_pte := pte
+    }
 
-    val ae = pte.v && invalid_paddr & !stage2
+    val ae = pte.v && invalid_paddr & do_both_stages & !stage2
     val gae = !(pte.v && pte.ur()) & stage2
     //for a guest "access execption" return a valid s2 pte with no permissions
     // essentially resulting in a invalid pte and leading to a guest page fault in the tlb
@@ -449,7 +451,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     assert(state === s_wait2)
     next_state := s_req
   }
-  when(next_state === s_ready){
+  when(Bool(usingHype) && next_state === s_ready){
     stage2 := false.B
     s2_final := false.B
   }
