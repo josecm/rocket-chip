@@ -37,11 +37,12 @@ class TLBReq(lgMaxSize: Int)(implicit p: Parameters) extends CoreBundle()(p) {
   override def cloneType = new TLBReq(lgMaxSize).asInstanceOf[this.type]
 }
 
-class TLBExceptions extends Bundle {
+class TLBExceptions(implicit p: Parameters) extends CoreBundle()(p) {
   val ld = Bool()
   val st = Bool()
   val inst = Bool()
   val v = Bool()
+  val gpaddr = UInt(width = vaddrBitsExtended)
 }
 
 class TLBResp(implicit p: Parameters) extends CoreBundle()(p) {
@@ -58,6 +59,7 @@ class TLBResp(implicit p: Parameters) extends CoreBundle()(p) {
 
 class TLBEntryData(implicit p: Parameters) extends CoreBundle()(p) {
   val ppn = UInt(width = ppnBits)
+  val gppn = UInt(width = ppnBits)
   val u = Bool()
   val g = Bool()
   val ae = Bool()
@@ -108,17 +110,18 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
       valid(idx) && sectorTagMatch(vpn) && virtualMatch(idx, vs1, vs2)
     }
   }
-  def ppn(vpn: UInt) = {
+  def ppn(vpn: UInt, guest: Boolean = false) = {
     val data = getData(vpn)
+    val ppn = if(guest) data.gppn else data.ppn
     if (superpage && usingVM) {
-      var res = data.ppn >> pgLevelBits*(pgLevels - 1)
+      var res = ppn >> pgLevelBits*(pgLevels - 1)
       for (j <- 1 until pgLevels) {
         val ignore = level < j || superpageOnly && j == pgLevels - 1
-        res = Cat(res, (Mux(ignore, vpn, 0.U) | data.ppn)(vpnBits - j*pgLevelBits - 1, vpnBits - (j + 1)*pgLevelBits))
+        res = Cat(res, (Mux(ignore, vpn, 0.U) | ppn)(vpnBits - j*pgLevelBits - 1, vpnBits - (j + 1)*pgLevelBits))
       }
       res
     } else {
-      data.ppn
+      ppn
     }
   }
 
@@ -224,6 +227,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   val real_hits = hitsVec.asUInt
   val hits = Cat(!vm_enabled, real_hits)
   val ppn = Mux1H(hitsVec :+ !vm_enabled, all_entries.map(_.ppn(vpn)) :+ vpn(ppnBits-1, 0))
+  val gppn = Mux1H(hitsVec :+ !vm_enabled, all_entries.map(_.ppn(vpn, true)) :+ vpn(ppnBits-1, 0))
 
   // permission bit arrays
   when (do_refill && !invalidate_refill) {
@@ -231,6 +235,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
     val pte_s2 = io.ptw.resp.bits.pte_s2
     val newEntry = Wire(new TLBEntryData)
     newEntry.ppn := pte.ppn
+    newEntry.gppn := pte_s2.ppn
     newEntry.c := cacheable
     newEntry.u := pte.u
     newEntry.g := pte.g && pte.v
@@ -349,6 +354,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   io.resp.pf.st := (bad_va && cmd_write_perms) || (pf_st_array & hits).orR
   io.resp.pf.inst := bad_va || (pf_inst_array & hits).orR
   io.resp.pf.v := priv_v & ((cmd_read & (~vr_array & hits).orR) | (cmd_write_perms & (~vw_array & hits).orR) | (~vx_array & hits).orR)
+  io.resp.pf.gpaddr := Mux(io.resp.pf.v, Cat(gppn, io.req.bits.vaddr(pgIdxBits-1, 0)), 0.U)
   io.resp.ae.ld := (ae_ld_array & hits).orR
   io.resp.ae.st := (ae_st_array & hits).orR
   io.resp.ae.inst := (~px_array & hits).orR

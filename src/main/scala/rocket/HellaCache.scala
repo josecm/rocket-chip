@@ -123,13 +123,14 @@ class HellaCacheResp(implicit p: Parameters) extends CoreBundle()(p)
   val store_data = Bits(width = coreDataBits)
 }
 
-class AlignmentExceptions extends Bundle {
+class AlignmentExceptions(implicit p: Parameters) extends CoreBundle()(p) {
   val ld = Bool()
   val st = Bool()
   val v = Bool()
+  val gpaddr =  UInt(width = vaddrBitsExtended)
 }
 
-class HellaCacheExceptions extends Bundle {
+class HellaCacheExceptions(implicit p: Parameters) extends CoreBundle()(p) {
   val ma = new AlignmentExceptions
   val pf = new AlignmentExceptions
   val ae = new AlignmentExceptions

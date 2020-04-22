@@ -200,6 +200,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val ex_scie_unpipelined = Reg(Bool())
   val ex_scie_pipelined = Reg(Bool())
   val ex_reg_wphit            = Reg(Vec(nBreakpoints, Bool()))
+  val ex_reg_gpaddr = Reg(UInt(width = vaddrBitsExtended))
 
   val mem_reg_xcpt_interrupt  = Reg(Bool())
   val mem_reg_valid           = Reg(Bool())
@@ -224,6 +225,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val mem_br_taken = Reg(Bool())
   val take_pc_mem = Wire(Bool())
   val mem_reg_wphit          = Reg(Vec(nBreakpoints, Bool()))
+  val mem_reg_gpaddr = RegNext(ex_reg_gpaddr)
 
   val wb_reg_valid           = Reg(Bool())
   val wb_reg_xcpt            = Reg(Bool())
@@ -239,6 +241,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val wb_reg_rs2 = Reg(Bits())
   val take_pc_wb = Wire(Bool())
   val wb_reg_wphit           = Reg(Vec(nBreakpoints, Bool()))
+  val wb_reg_gpaddr = RegNext(mem_reg_gpaddr)
 
   val take_pc_mem_wb = take_pc_wb || take_pc_mem
   val take_pc = take_pc_mem_wb
@@ -330,6 +333,8 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     (id_xcpt1.pf.inst, Mux(id_xcpt1.pf.v, UInt(Causes.fetch_guest_page_fault), UInt(Causes.fetch_page_fault))),
     (id_xcpt1.ae.inst, UInt(Causes.fetch_access)),
     (id_illegal_insn,  UInt(Causes.illegal_instruction))))
+
+  ex_reg_gpaddr := id_xcpt0.pf.gpaddr
 
   val idCoverCauses = List(
     (CSR.debugTriggerCause, "DEBUG_TRIGGER"),
@@ -685,8 +690,13 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val tval_valid = wb_xcpt && wb_cause.isOneOf(Causes.illegal_instruction, Causes.breakpoint,
     Causes.misaligned_load, Causes.misaligned_store,
     Causes.load_access, Causes.store_access, Causes.fetch_access,
-    Causes.load_page_fault, Causes.store_page_fault, Causes.fetch_page_fault)
+    Causes.load_page_fault, Causes.store_page_fault, Causes.fetch_page_fault,
+    Causes.store_guest_page_fault, Causes.load_guest_page_fault, Causes.fetch_guest_page_fault)
+  val htval_valid = Bool(usingHype) && wb_xcpt && wb_cause.isOneOf(Causes.store_guest_page_fault,
+   Causes.load_guest_page_fault, Causes.fetch_guest_page_fault)
   csr.io.tval := Mux(tval_valid, encodeVirtualAddress(wb_reg_wdata, wb_reg_wdata), 0.U)
+  val wb_gpaddr = Mux(wb_reg_xcpt, wb_reg_gpaddr , io.dmem.s2_xcpt.pf.gpaddr)
+  csr.io.htval := Mux(htval_valid, encodeVirtualAddress(wb_gpaddr, wb_gpaddr), 0.U)
   io.ptw.ptbr := csr.io.ptbr
   io.ptw.vptbr := csr.io.vptbr
   (io.ptw.customCSRs.csrs zip csr.io.customCSRs).map { case (lhs, rhs) => lhs := rhs }

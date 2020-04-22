@@ -239,7 +239,7 @@ class CSRFileIO(implicit p: Parameters) extends CoreBundle
   val cause = UInt(INPUT, xLen)
   val pc = UInt(INPUT, vaddrBitsExtended)
   val tval = UInt(INPUT, vaddrBitsExtended)
-  val hval = UInt(INPUT, vaddrBitsExtended)
+  val htval = UInt(INPUT, vaddrBitsExtended)
   val time = UInt(OUTPUT, xLen)
   val fcsr_rm = Bits(OUTPUT, FPConstants.RM_SZ)
   val fcsr_flags = Valid(Bits(width = FPConstants.FLAGS_SZ)).flip
@@ -839,6 +839,7 @@ class CSRFile(
   val epc = formEPC(io.pc)
   val noCause :: mCause :: hCause :: sCause :: uCause :: Nil = Enum(5)
   val xcause_dest = Wire(init = noCause)
+  val is_guest_page_fault = !cause(xLen-1) && cause(4) // the only faults larger than 16 are guest-page-faults
 
   when (exception) {
     when (trapToDebug) {
@@ -865,7 +866,7 @@ class CSRFile(
         reg_mstatus.v := false
         reg_hstatus.spvp := Mux(reg_mstatus.v, reg_mstatus.prv(0),reg_hstatus.spvp)
         reg_hstatus.gva := io.tval =/= 0.U
-        //TODO: reg_hstatus.htval := Mux(is_guest_page_fault, io.gpa >> 2.U, 0.U)
+        reg_htval := Mux(is_guest_page_fault, io.htval >> 2, 0.U)
         //TODO: reg_hstatus.htinst := hstatus.spp
         reg_hstatus.spv  := reg_mstatus.v
       }
@@ -882,7 +883,7 @@ class CSRFile(
         reg_mstatus.v := false
         reg_mstatus.mpv := reg_mstatus.v
         reg_mstatus.gva := io.tval =/= 0.U
-        //TODO: reg_mstatus.mtval2 := Mux(is_guest_page_fault, io.gpa >> 2.U, 0.U)
+        reg_mtval2 := Mux(is_guest_page_fault, io.htval >> 2, 0.U)
         //TODO: reg_mstatus.mtinst := 
       }
       reg_mepc := epc

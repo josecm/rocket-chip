@@ -433,7 +433,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
   when(Bool(usingHype) && mem_resp_valid && !traverse) {
     
     when(stage2){
-        aux_pte := pte
+        aux_pte := makePTE(aux_pte.ppn ,pte)
     }
 
     val ae = pte.v && invalid_paddr & do_both_stages & !stage2
