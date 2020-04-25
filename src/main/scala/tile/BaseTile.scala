@@ -51,7 +51,7 @@ trait HasNonDiplomaticTileParameters {
   def pgIdxBits: Int = 12
   def pgLevelBits: Int = 10 - log2Ceil(xLen / 32)
   def pgLevels: Int = p(PgLevels)
-  def maxSVAddrBits: Int = pgIdxBits + pgLevels * pgLevelBits
+  def maxSVAddrBits: Int = pgIdxBits + pgLevels * pgLevelBits + { if(usingHype) 2 else 0 }
   def minPgLevels: Int = {
     val res = xLen match { case 32 => 2; case 64 => 3 }
     require(pgLevels >= res)

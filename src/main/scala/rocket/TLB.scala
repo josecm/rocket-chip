@@ -59,7 +59,7 @@ class TLBResp(implicit p: Parameters) extends CoreBundle()(p) {
 
 class TLBEntryData(implicit p: Parameters) extends CoreBundle()(p) {
   val ppn = UInt(width = ppnBits)
-  val gppn = UInt(width = ppnBits)
+  val gppn = UInt(width = vpnBitsExtended)
   val u = Bool()
   val g = Bool()
   val ae = Bool()
@@ -113,11 +113,12 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
   def ppn(vpn: UInt, guest: Boolean = false) = {
     val data = getData(vpn)
     val ppn = if(guest) data.gppn else data.ppn
+    val minVPNBits = minPgLevels * pgLevelBits
     if (superpage && usingVM) {
       var res = ppn >> pgLevelBits*(pgLevels - 1)
       for (j <- 1 until pgLevels) {
         val ignore = level < j || superpageOnly && j == pgLevels - 1
-        res = Cat(res, (Mux(ignore, vpn, 0.U) | ppn)(vpnBits - j*pgLevelBits - 1, vpnBits - (j + 1)*pgLevelBits))
+        res = Cat(res, (Mux(ignore, vpn, 0.U) | ppn)(minVPNBits - j*pgLevelBits - 1, minVPNBits - (j + 1)*pgLevelBits))
       }
       res
     } else {
@@ -227,7 +228,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   val real_hits = hitsVec.asUInt
   val hits = Cat(!vm_enabled, real_hits)
   val ppn = Mux1H(hitsVec :+ !vm_enabled, all_entries.map(_.ppn(vpn)) :+ vpn(ppnBits-1, 0))
-  val gppn = Mux1H(hitsVec :+ !vm_enabled, all_entries.map(_.ppn(vpn, true)) :+ vpn(ppnBits-1, 0))
+  val gppn = Mux1H(hitsVec :+ (stage2_enbl && !stage1_enbl), all_entries.map(_.ppn(vpn, true)) :+ io.req.bits.vaddr(vaddrBitsExtended-1, pgIdxBits))
 
   // permission bit arrays
   when (do_refill && !invalidate_refill) {
@@ -295,15 +296,16 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   val prefetchable_array = Cat((cacheable && homogeneous) << (nPhysicalEntries-1), normal_entries.map(_.c).asUInt)
 
   val misaligned = (io.req.bits.vaddr & (UIntToOH(io.req.bits.size) - 1)).orR
-  val bad_va = if (!usingVM || (minPgLevels == pgLevels && vaddrBits == vaddrBitsExtended)) false.B else vm_enabled && {
+  val bad_guest_pa = Mux(vm_enabled && !stage1_enbl, (io.req.bits.vaddr >> vaddrBits) =/= 0.U, false.B)
+  val bad_va = if (!usingVM || (minPgLevels == pgLevels && vaddrBits == vaddrBitsExtended)) false.B else vm_enabled && stage1_enbl && {
     val nPgLevelChoices = pgLevels - minPgLevels + 1
     val minVAddrBits = pgIdxBits + minPgLevels * pgLevelBits
     (for (i <- 0 until nPgLevelChoices) yield {
-      val mask = ((BigInt(1) << vaddrBitsExtended) - (BigInt(1) << (minVAddrBits + i * pgLevelBits - 1))).U
-      val maskedVAddr = io.req.bits.vaddr & mask
-      io.ptw.ptbr.additionalPgLevels === i && !(maskedVAddr === 0 || maskedVAddr === mask)
+        val mask = ((BigInt(1) << vaddrBitsExtended) - (BigInt(1) << (minVAddrBits + i * pgLevelBits - 1))).U
+        val maskedVAddr = io.req.bits.vaddr & mask
+        io.ptw.ptbr.additionalPgLevels === i && !(maskedVAddr === 0 || maskedVAddr === mask)
     }).orR
-  }
+  } || bad_guest_pa
 
   val cmd_lrsc = Bool(usingAtomics) && io.req.bits.cmd.isOneOf(M_XLR, M_XSC)
   val cmd_amo_logical = Bool(usingAtomics) && isAMOLogical(io.req.bits.cmd)
@@ -353,7 +355,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   io.resp.pf.ld := (bad_va && cmd_read) || (pf_ld_array & hits).orR
   io.resp.pf.st := (bad_va && cmd_write_perms) || (pf_st_array & hits).orR
   io.resp.pf.inst := bad_va || (pf_inst_array & hits).orR
-  io.resp.pf.v := priv_v & ((cmd_read & (~vr_array & hits).orR) | (cmd_write_perms & (~vw_array & hits).orR) | (~vx_array & hits).orR)
+  io.resp.pf.v := priv_v & (bad_guest_pa | (cmd_read & (~vr_array & hits).orR) | (cmd_write_perms & (~vw_array & hits).orR) | (~vx_array & hits).orR)
   io.resp.pf.gpaddr := Mux(io.resp.pf.v, Cat(gppn, io.req.bits.vaddr(pgIdxBits-1, 0)), 0.U)
   io.resp.ae.ld := (ae_ld_array & hits).orR
   io.resp.ae.st := (ae_st_array & hits).orR

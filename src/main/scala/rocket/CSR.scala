@@ -425,7 +425,7 @@ class CSRFile(
   val reg_mepc = Reg(UInt(width = vaddrBitsExtended))
   val reg_mcause = Reg(Bits(width = xLen))
   val reg_mtval = Reg(UInt(width = vaddrBitsExtended))
-  val reg_mtval2 = Reg(UInt(width = xLen))
+  val reg_mtval2 = Reg(UInt(width = vaddrBitsExtended))
   val reg_mtinst = Reg(UInt(width = xLen))
   val reg_mscratch = Reg(Bits(width = xLen))
   val mtvecWidth = paddrBits min xLen
@@ -663,7 +663,7 @@ class CSRFile(
     read_mapping += CSRs.hvip -> read_hvip
     read_mapping += CSRs.hgeie -> reg_hgeie
     read_mapping += CSRs.hgeip -> reg_hgeip
-    read_mapping += CSRs.htval -> reg_htval.sextTo(xLen)
+    read_mapping += CSRs.htval -> reg_htval
     read_mapping += CSRs.htinst -> reg_htinst
 
     val read_vsie = (read_hie & read_hideleg) >> 1
@@ -866,7 +866,7 @@ class CSRFile(
         reg_mstatus.v := false
         reg_hstatus.spvp := Mux(reg_mstatus.v, reg_mstatus.prv(0),reg_hstatus.spvp)
         reg_hstatus.gva := io.tval =/= 0.U
-        reg_htval := Mux(is_guest_page_fault, io.htval >> 2, 0.U)
+        reg_htval := Mux(is_guest_page_fault, io.htval(vaddrBits-1,0) >> 2, 0.U)
         //TODO: reg_hstatus.htinst := hstatus.spp
         reg_hstatus.spv  := reg_mstatus.v
       }
@@ -883,7 +883,7 @@ class CSRFile(
         reg_mstatus.v := false
         reg_mstatus.mpv := reg_mstatus.v
         reg_mstatus.gva := io.tval =/= 0.U
-        reg_mtval2 := Mux(is_guest_page_fault, io.htval >> 2, 0.U)
+        reg_mtval2 := Mux(is_guest_page_fault, io.htval(vaddrBits-1,0) >> 2, 0.U)
         //TODO: reg_mstatus.mtinst := 
       }
       reg_mepc := epc
@@ -1146,7 +1146,7 @@ class CSRFile(
 
     if (usingHype) {
       when (decoded_addr(CSRs.mtinst))  { reg_mtinst := wdata }
-      when (decoded_addr(CSRs.mtval2))  { reg_mtval2 := wdata }
+      when (decoded_addr(CSRs.mtval2))  { reg_mtval2 := wdata(vaddrBits-1,0) }
       when (decoded_addr(CSRs.hstatus)) {
          val new_hstatus = new HStatus().fromBits(wdata)
           reg_hstatus.vsbe := new_hstatus.vsbe
@@ -1183,7 +1183,7 @@ class CSRFile(
       }
 
       when (decoded_addr(CSRs.hcounteren)) { reg_hcounteren := wdata }
-      when (decoded_addr(CSRs.htval))    { reg_htval := wdata(vaddrBitsExtended-1,0) }
+      when (decoded_addr(CSRs.htval))    { reg_htval := wdata(vaddrBits-1,0) }
       when (decoded_addr(CSRs.htinst))    { reg_htinst := wdata }
 
 
@@ -1210,7 +1210,7 @@ class CSRFile(
         val valid_modes = 0 +: (minPgLevels to pgLevels).map(new_vsatp.pgLevelsToMode(_))
         when (new_vsatp.mode.isOneOf(valid_modes.map(_.U))) {
           reg_vsatp.mode := new_vsatp.mode & valid_modes.reduce(_|_)
-          reg_vsatp.ppn := new_vsatp.ppn(ppnBits-1,0)
+          reg_vsatp.ppn := new_vsatp.ppn(vpnBits-1,0)
           if (asIdBits > 0) reg_vsatp.asid := new_vsatp.asid(asIdBits-1,0)
         }
       }
@@ -1242,7 +1242,7 @@ class CSRFile(
             val valid_modes = 0 +: (minPgLevels to pgLevels).map(new_satp.pgLevelsToMode(_))
             when (new_satp.mode.isOneOf(valid_modes.map(_.U))) {
                 reg_vsatp.mode := new_satp.mode & valid_modes.reduce(_|_)
-                reg_vsatp.ppn := new_satp.ppn(ppnBits-1,0)
+                reg_vsatp.ppn := new_satp.ppn(vpnBits-1,0)
                 if (asIdBits > 0) reg_vsatp.asid := new_satp.asid(asIdBits-1,0)
             }
         }

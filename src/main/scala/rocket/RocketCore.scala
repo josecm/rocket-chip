@@ -515,7 +515,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val mem_cfi = mem_ctrl.branch || mem_ctrl.jalr || mem_ctrl.jal
   val mem_cfi_taken = (mem_ctrl.branch && mem_br_taken) || mem_ctrl.jalr || mem_ctrl.jal
   val mem_direction_misprediction = mem_ctrl.branch && mem_br_taken =/= (usingBTB && mem_reg_btb_resp.taken)
-  val mem_misprediction = if (usingBTB) mem_wrong_npc else mem_cfi_taken
+  val mem_misprediction : Bool = if (usingBTB) mem_wrong_npc else mem_cfi_taken
   take_pc_mem := mem_reg_valid && (mem_misprediction || mem_reg_sfence)
 
   mem_reg_valid := !ctrl_killx
@@ -696,7 +696,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
    Causes.load_guest_page_fault, Causes.fetch_guest_page_fault)
   csr.io.tval := Mux(tval_valid, encodeVirtualAddress(wb_reg_wdata, wb_reg_wdata), 0.U)
   val wb_gpaddr = Mux(wb_reg_xcpt, wb_reg_gpaddr , io.dmem.s2_xcpt.pf.gpaddr)
-  csr.io.htval := Mux(htval_valid, encodeVirtualAddress(wb_gpaddr, wb_gpaddr), 0.U)
+  csr.io.htval := Mux(htval_valid, wb_gpaddr, 0.U)
   io.ptw.ptbr := csr.io.ptbr
   io.ptw.vptbr := csr.io.vptbr
   (io.ptw.customCSRs.csrs zip csr.io.customCSRs).map { case (lhs, rhs) => lhs := rhs }
@@ -935,6 +935,23 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     docstring = "Kill the emulation after INT rdtime cycles. Off if 0."
   )(csr.io.time)
 
+  def encodeVirtualAddress(a0: UInt, ea: UInt) = if (vaddrBitsExtended == vaddrBits) ea else {
+    // efficient means to compress 64-bit VA into vaddrBits+1 bits
+    // (VA is bad if VA(vaddrBits) != VA(vaddrBits-1))
+    val guest_pa = Bool(usingHype) && csr.io.status.v && 
+        csr.io.ptbr.mode === 0.U && csr.io.vptbr.mode =/= 0.U
+    Mux(guest_pa, {
+      val a = a0.asSInt >> vaddrBits
+      val msb = (a =/= 0.S).asUInt
+      Cat(msb, ea(vaddrBits-1,0))
+    }, {
+      val minVAddrBits = pgIdxBits + minPgLevels * pgLevelBits
+      val a = a0.asSInt >> minVAddrBits
+      val msb = Mux(a === 0.S || a === -1.S, ea(minVAddrBits), !ea(minVAddrBits-1))
+      Cat(Fill(vaddrBitsExtended-minVAddrBits, msb), ea(minVAddrBits-1,0))
+    })
+  }
+
   } // leaving gated-clock domain
   val rocketImpl = withClock (gated_clock) { new RocketImpl }
 
@@ -949,14 +966,6 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
 
   def checkHazards(targets: Seq[(Bool, UInt)], cond: UInt => Bool) =
     targets.map(h => h._1 && cond(h._2)).reduce(_||_)
-
-  def encodeVirtualAddress(a0: UInt, ea: UInt) = if (vaddrBitsExtended == vaddrBits) ea else {
-    // efficient means to compress 64-bit VA into vaddrBits+1 bits
-    // (VA is bad if VA(vaddrBits) != VA(vaddrBits-1))
-    val a = a0.asSInt >> vaddrBits
-    val msb = Mux(a === 0.S || a === -1.S, ea(vaddrBits), !ea(vaddrBits-1))
-    Cat(msb, ea(vaddrBits-1,0))
-  }
 
   class Scoreboard(n: Int, zero: Boolean = false)
   {
