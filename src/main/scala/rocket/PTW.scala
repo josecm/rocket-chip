@@ -17,6 +17,9 @@ import scala.collection.mutable.ListBuffer
 
 class PTWReq(implicit p: Parameters) extends CoreBundle()(p) {
   val addr = UInt(width = vpnBits)
+  val priv_v = Bool()
+  val do_stage1 = Bool()
+  val do_stage2 = Bool()
 }
 
 class PTWResp(implicit p: Parameters) extends CoreBundle()(p) {
@@ -33,8 +36,11 @@ class TLBPTWIO(implicit p: Parameters) extends CoreBundle()(p)
   val req = Decoupled(Valid(new PTWReq))
   val resp = Valid(new PTWResp).flip
   val ptbr = new PTBR().asInput
-  val vptbr = new PTBR().asInput
+  val hptbr = new PTBR().asInput
+  val gptbr = new PTBR().asInput
   val status = new MStatus().asInput
+  val hstatus = new HStatus().asInput
+  val gstatus = new MStatus().asInput
   val pmp = Vec(nPMPs, new PMP).asInput
   val customCSRs = coreParams.customCSRs.asInput
 }
@@ -46,9 +52,12 @@ class PTWPerfEvents extends Bundle {
 class DatapathPTWIO(implicit p: Parameters) extends CoreBundle()(p)
     with HasCoreParameters {
   val ptbr = new PTBR().asInput
-  val vptbr = new PTBR().asInput
+  val hptbr = new PTBR().asInput
+  val gptbr = new PTBR().asInput
   val sfence = Valid(new SFenceReq).flip
   val status = new MStatus().asInput
+  val hstatus = new HStatus().asInput
+  val gstatus = new MStatus().asInput
   val pmp = Vec(nPMPs, new PMP).asInput
   val perf = new PTWPerfEvents().asOutput
   val customCSRs = coreParams.customCSRs.asInput
@@ -126,8 +135,9 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
   val r_req_dest = Reg(Bits())
   val r_pte = Reg(new PTE)
 
-  val do_stage2 = Bool(usingHype) && io.dpath.status.v && io.dpath.vptbr.mode.orR 
-  val do_stage1 = !Bool(usingHype) || !io.dpath.status.v || io.dpath.ptbr.mode.orR
+  val priv_v = Bool(usingHype) & Mux(arb.io.out.fire(), arb.io.out.bits.bits.priv_v, r_req.priv_v)
+  val do_stage2 = Bool(usingHype) & Mux(arb.io.out.fire(), arb.io.out.bits.bits.do_stage2, r_req.do_stage2)
+  val do_stage1 = !Bool(usingHype) || Mux(arb.io.out.fire(), arb.io.out.bits.bits.do_stage1, r_req.do_stage1)
   val do_both_stages = do_stage1 & do_stage2
   val stage2 = RegInit(false.B)
   val s2_final = RegInit(false.B)
@@ -186,7 +196,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     val valid = RegInit(0.U(size.W))
     val tags = Reg(Vec(size, UInt(width = paddrBits + { if(usingHype) 2 else 0 } )))
     val data = Reg(Vec(size, UInt(width = ppnBits)))
-    val tagged_pte_addr = Cat(do_stage1 & io.dpath.status.v, do_stage2, pte_addr)
+    val tagged_pte_addr = Cat(do_stage1 & priv_v, do_stage2, pte_addr)
 
     val hits = tags.map(_ === tagged_pte_addr).asUInt & valid
     val hit = hits.orR
@@ -221,7 +231,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
 
     val g = Reg(UInt(width = coreParams.nL2TLBEntries)) //TODO what is this?
     val valid = RegInit(UInt(0, coreParams.nL2TLBEntries))
-    val (r_tag, r_idx) = Split(Cat(io.dpath.status.v, r_req.addr), idxBits)
+    val (r_tag, r_idx) = Split(Cat(priv_v, r_req.addr), idxBits)
     when (l2_refill && !invalidated) {
       val entry = Wire(new L2TLBEntry)
       entry := r_pte
@@ -295,9 +305,12 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     io.requestor(i).resp.bits.homogeneous := homogeneous || pageGranularityPMPs
     io.requestor(i).resp.bits.fragmented_superpage := resp_fragmented_superpage && pageGranularityPMPs
     io.requestor(i).ptbr := io.dpath.ptbr
-    io.requestor(i).vptbr := io.dpath.vptbr
+    io.requestor(i).hptbr := io.dpath.hptbr
+    io.requestor(i).gptbr := io.dpath.gptbr
     io.requestor(i).customCSRs := io.dpath.customCSRs
     io.requestor(i).status := io.dpath.status
+    io.requestor(i).hstatus := io.dpath.hstatus
+    io.requestor(i).gstatus := io.dpath.gstatus
     io.requestor(i).pmp := io.dpath.pmp
   }
 
@@ -318,6 +331,8 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
       pte
   }
 
+  val ptbr = Mux(priv_v, io.dpath.gptbr, io.dpath.ptbr)
+
   switch (state) {
     is (s_ready) {
       assert(stage2 === false.B)  
@@ -327,7 +342,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
         aux_pte := Mux(do_both_stages, new PTE().fromBits(0), fullPermPTE)
         aux_count := 0.U
       }
-      count := pgLevels - minPgLevels - io.dpath.ptbr.additionalPgLevels
+      count := pgLevels - minPgLevels - ptbr.additionalPgLevels
     }
     is (s_switch){
      assert(do_both_stages === true.B && stage2 === false.B)
@@ -335,7 +350,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
        count := count + 1
      }.otherwise {
         aux_count := count
-        count := pgLevels - minPgLevels - io.dpath.vptbr.additionalPgLevels
+        count := pgLevels - minPgLevels - io.dpath.hptbr.additionalPgLevels
         aux_pte := r_pte
         stage2 := true.B
         next_state := s_req
@@ -390,8 +405,8 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     Mux(l2_hit && !l2_error, l2_pte,
     Mux(state === s_fragment_superpage && !homogeneous, makePTE(fragmented_superpage_ppn, r_pte),
     Mux((state === s_req || state === s_switch) && pte_cache_hit, makePTE(pte_cache_data, l2_pte),
-    Mux(state === s_switch, makePTE(io.dpath.vptbr.ppn, r_pte),
-    Mux(arb.io.out.fire(), Mux(do_stage1, makePTE(io.dpath.ptbr.ppn, r_pte), makePTE(io.dpath.vptbr.ppn, r_pte)),
+    Mux(state === s_switch, makePTE(io.dpath.hptbr.ppn, r_pte),
+    Mux(arb.io.out.fire(), Mux(do_stage1, makePTE(ptbr.ppn, r_pte), makePTE(io.dpath.hptbr.ppn, r_pte)),
     r_pte))))))))
 
   when (l2_hit && !l2_error) {
@@ -435,12 +450,12 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
         aux_pte := makePTE(aux_pte.ppn ,pte)
     }
 
-    val ae = pte.v && invalid_paddr & do_both_stages & !stage2
-    val gae = !(pte.v && pte.ur()) & stage2
+    val ae = !pte.v && do_both_stages && !stage2
+    val gae = Mux(stage2, !(pte.v && pte.ur() | s2_final), pte.v && invalid_paddr && do_both_stages)
     //for a guest "access execption" return a valid s2 pte with no permissions
     // essentially resulting in a invalid pte and leading to a guest page fault in the tlb
     when(ae | gae) {
-        aux_pte.v := false.B 
+        when(gae) { aux_pte.v := false.B } 
         next_state := s_ready
         resp_valid(r_req_dest) := true
     } 

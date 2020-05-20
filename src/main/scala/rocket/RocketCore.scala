@@ -174,6 +174,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     (if (xLen == 32) new I32Decode else new I64Decode) +:
     (usingVM.option(new SDecode)) ++:
     (usingHype.option(new HDecode)) ++:
+    ((usingHype && (xLen == 64)).option(new H64Decode)) ++:
     (usingDebug.option(new DebugDecode)) ++:
     Seq(new FenceIDecode(tile.dcache.flushOnFenceI)) ++:
     coreParams.haveCFlush.option(new CFlushDecode(tile.dcache.canSupportCFlushLine)) ++:
@@ -283,6 +284,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val id_sfence = id_ctrl.mem && id_ctrl.mem_cmd === M_SFENCE
   val id_csr_flush = id_sfence || id_system_insn || (id_csr_en && !id_csr_ren && csr.io.decode(0).write_flush)
 
+
   val id_scie_decoder = if (!rocketParams.useSCIE) Wire(new SCIEDecoderInterface) else {
     val d = Module(new SCIEDecoder)
     assert(PopCount(d.io.unpipelined :: d.io.pipelined :: d.io.multicycle :: Nil) <= 1)
@@ -315,6 +317,11 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
      mem_reg_valid && mem_ctrl.rocc || wb_reg_valid && wb_ctrl.rocc)
   val id_do_fence = Wire(init = id_rocc_busy && id_ctrl.fence ||
     id_mem_busy && (id_ctrl.amo && id_amo_rl || id_ctrl.fence_i || id_reg_fence && (id_ctrl.mem || id_ctrl.rocc)))
+  val id_hls = Wire(init = csr.io.decode(0).hls)
+  id_hls.v := csr.io.decode(0).hls.v && id_system_insn
+  val ex_hls = RegNext(id_hls)
+  val mem_hls = RegNext(ex_hls)
+  val wb_hls = RegNext(mem_hls)
 
   val bpu = Module(new BreakpointUnit(nBreakpoints))
   bpu.io.status := csr.io.status
@@ -446,7 +453,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     }
     ex_reg_flush_pipe := id_ctrl.fence_i || id_csr_flush
     ex_reg_load_use := id_load_use
-    ex_reg_mem_size := id_inst(0)(13, 12)
+    ex_reg_mem_size := Mux(id_hls.v, id_inst(0)(27, 26), id_inst(0)(13, 12))
     when (id_ctrl.mem_cmd.isOneOf(M_SFENCE, M_FLUSH_ALL)) {
       ex_reg_mem_size := Cat(id_raddr2 =/= UInt(0), id_raddr1 =/= UInt(0))
     }
@@ -677,6 +684,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   // hook up control/status regfile
   csr.io.ungated_clock := clock
   csr.io.decode(0).csr := id_raw_inst(0)(31,20)
+  csr.io.decode(0).minopcode :=  id_raw_inst(0)(14,12)
   csr.io.exception := wb_xcpt
   csr.io.cause := wb_cause
   csr.io.retire := wb_valid
@@ -694,15 +702,20 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     Causes.store_guest_page_fault, Causes.load_guest_page_fault, Causes.fetch_guest_page_fault)
   val htval_valid = Bool(usingHype) && wb_xcpt && wb_cause.isOneOf(Causes.store_guest_page_fault,
    Causes.load_guest_page_fault, Causes.fetch_guest_page_fault)
+  csr.io.gva := tval_valid && (csr.io.status.v || csr.io.status.dv || wb_hls.v)
   csr.io.tval := Mux(tval_valid, encodeVirtualAddress(wb_reg_wdata, wb_reg_wdata), 0.U)
   val wb_gpaddr = Mux(wb_reg_xcpt, wb_reg_gpaddr , io.dmem.s2_xcpt.pf.gpaddr)
   csr.io.htval := Mux(htval_valid, wb_gpaddr, 0.U)
   io.ptw.ptbr := csr.io.ptbr
-  io.ptw.vptbr := csr.io.vptbr
+  io.ptw.hptbr := csr.io.hptbr
+  io.ptw.gptbr := csr.io.gptbr
   (io.ptw.customCSRs.csrs zip csr.io.customCSRs).map { case (lhs, rhs) => lhs := rhs }
   io.ptw.status := csr.io.status
+  io.ptw.hstatus := csr.io.hstatus
+  io.ptw.gstatus := csr.io.gstatus
   io.ptw.pmp := csr.io.pmp
   csr.io.rw.addr := wb_reg_inst(31,20)
+  csr.io.rw.addr2 := wb_reg_inst(14,12)
   csr.io.rw.cmd := CSR.maskCmd(wb_reg_valid, wb_ctrl.csr)
   csr.io.rw.wdata := wb_reg_wdata
   io.trace := csr.io.trace
@@ -839,9 +852,10 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   io.dmem.req.bits.tag  := ex_dcache_tag
   io.dmem.req.bits.cmd  := ex_ctrl.mem_cmd
   io.dmem.req.bits.size := ex_reg_mem_size
-  io.dmem.req.bits.signed := !ex_reg_inst(14)
+  io.dmem.req.bits.signed := !Mux(ex_hls.v, ex_reg_inst(20), ex_reg_inst(14)) 
   io.dmem.req.bits.phys := Bool(false)
   io.dmem.req.bits.addr := encodeVirtualAddress(ex_rs(0), alu.io.adder_out)
+  io.dmem.req.bits.hls := ex_hls
   io.dmem.s1_data.data := (if (fLen == 0) mem_reg_rs2 else Mux(mem_ctrl.fp, Fill((xLen max fLen) / fLen, io.fpu.store_data), mem_reg_rs2))
   io.dmem.s1_kill := killm_common || mem_ldst_xcpt || fpu_kill_mem
   io.dmem.s2_kill := false
@@ -939,7 +953,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     // efficient means to compress 64-bit VA into vaddrBits+1 bits
     // (VA is bad if VA(vaddrBits) != VA(vaddrBits-1))
     val guest_pa = Bool(usingHype) && csr.io.status.v && 
-        csr.io.ptbr.mode === 0.U && csr.io.vptbr.mode =/= 0.U
+        csr.io.ptbr.mode === 0.U && csr.io.hptbr.mode =/= 0.U
     Mux(guest_pa, {
       val a = a0.asSInt >> vaddrBits
       val msb = (a =/= 0.S).asUInt

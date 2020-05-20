@@ -33,6 +33,7 @@ class TLBReq(lgMaxSize: Int)(implicit p: Parameters) extends CoreBundle()(p) {
   val passthrough = Bool()
   val size = UInt(width = log2Ceil(lgMaxSize + 1))
   val cmd  = Bits(width = M_SZ)
+  val hls = new HypLoadStore()
 
   override def cloneType = new TLBReq(lgMaxSize).asInstanceOf[this.type]
 }
@@ -186,13 +187,19 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   val r_sectored_repl_addr = Reg(UInt(log2Ceil(sectored_entries.size).W))
   val r_sectored_hit_addr = Reg(UInt(log2Ceil(sectored_entries.size).W))
   val r_sectored_hit = Reg(Bool())
+  val r_stage1_enbl = Reg(Bool())
+  val r_stage2_enbl = Reg(Bool())
+  val r_priv_v = Reg(Bool())
 
-  val priv = if (instruction) io.ptw.status.prv else io.ptw.status.dprv
+  val hls = io.req.bits.hls
+  val priv = if (instruction) io.ptw.status.prv else Mux(hls.v, hls.dprv, io.ptw.status.dprv)
   val priv_s = priv(0)
   val priv_uses_vm = priv <= PRV.S
-  val priv_v = Bool(usingHype) && io.ptw.status.v
-  val stage1_enbl = Bool(usingVM) && io.ptw.ptbr.mode(io.ptw.ptbr.mode.getWidth-1)
-  val stage2_enbl = Bool(usingHype) && io.ptw.vptbr.mode(io.ptw.vptbr.mode.getWidth-1) && priv_v
+  val priv_v = Bool(usingHype) && { if (instruction) io.ptw.status.v else (io.ptw.status.v || io.ptw.status.dv || hls.v) }
+  val ptbr = Mux(priv_v, io.ptw.gptbr, io.ptw.ptbr)
+  val status = Mux(priv_v, io.ptw.gstatus, io.ptw.status)
+  val stage1_enbl = Bool(usingVM) && ptbr.mode(ptbr.mode.getWidth-1)
+  val stage2_enbl = Bool(usingHype) && priv_v && io.ptw.hptbr.mode(io.ptw.hptbr.mode.getWidth-1)
   val vm_enabled = (stage1_enbl || stage2_enbl) && priv_uses_vm && !io.req.bits.passthrough
 
   // share a single physical memory attribute checker (unshare if critical path)
@@ -256,16 +263,16 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
     newEntry.fragmented_superpage := io.ptw.resp.bits.fragmented_superpage
 
     when (special_entry.nonEmpty && !io.ptw.resp.bits.homogeneous) {
-      special_entry.foreach(_.insert(r_refill_tag, io.ptw.resp.bits.level, newEntry, stage1_enbl & priv_v, stage2_enbl))
+      special_entry.foreach(_.insert(r_refill_tag, io.ptw.resp.bits.level, newEntry, r_stage1_enbl & r_priv_v, r_stage2_enbl))
     }.elsewhen (io.ptw.resp.bits.level < pgLevels-1) {
       for ((e, i) <- superpage_entries.zipWithIndex) when (r_superpage_repl_addr === i) {
-        e.insert(r_refill_tag, io.ptw.resp.bits.level, newEntry, stage1_enbl & priv_v, stage2_enbl)
+        e.insert(r_refill_tag, io.ptw.resp.bits.level, newEntry, r_stage1_enbl & r_priv_v, r_stage2_enbl)
       }
     }.otherwise {
       val waddr = Mux(r_sectored_hit, r_sectored_hit_addr, r_sectored_repl_addr)
       for ((e, i) <- sectored_entries.zipWithIndex) when (waddr === i) {
         when (!r_sectored_hit) { e.invalidate() }
-        e.insert(r_refill_tag, 0.U, newEntry, stage1_enbl & priv_v, stage2_enbl)
+        e.insert(r_refill_tag, 0.U, newEntry, r_stage1_enbl & r_priv_v, r_stage2_enbl)
       }
     }
   }
@@ -274,10 +281,10 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   val normal_entries = ordinary_entries.map(_.getData(vpn))
   val nPhysicalEntries = 1 + special_entry.size
   val ptw_ae_array = Cat(false.B, entries.map(_.ae).asUInt)
-  val priv_rw_ok = Mux(!priv_s || io.ptw.status.sum, entries.map(_.u).asUInt, 0.U) | Mux(priv_s, ~entries.map(_.u).asUInt, 0.U)
+  val priv_rw_ok = Mux(!priv_s || status.sum, entries.map(_.u).asUInt, 0.U) | Mux(priv_s, ~entries.map(_.u).asUInt, 0.U)
   val priv_x_ok = Mux(priv_s, ~entries.map(_.u).asUInt, entries.map(_.u).asUInt)
   val stage1_bypass = Fill(entries.size, Bool(usingHype) & !stage1_enbl)
-  val r_array = Cat(true.B, (priv_rw_ok & (entries.map(_.sr).asUInt | Mux(io.ptw.status.mxr, entries.map(_.sx).asUInt, UInt(0)))) | stage1_bypass)
+  val r_array = Cat(true.B, (priv_rw_ok & (entries.map(_.sr).asUInt | Mux(status.mxr, entries.map(_.sx).asUInt, UInt(0)))) | stage1_bypass)
   val w_array = Cat(true.B, (priv_rw_ok & entries.map(_.sw).asUInt) | stage1_bypass)
   val x_array = Cat(true.B, (priv_x_ok & entries.map(_.sx).asUInt) | stage1_bypass)
   val stage2_bypass = Fill(entries.size, !stage2_enbl)
@@ -303,7 +310,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
     (for (i <- 0 until nPgLevelChoices) yield {
         val mask = ((BigInt(1) << vaddrBitsExtended) - (BigInt(1) << (minVAddrBits + i * pgLevelBits - 1))).U
         val maskedVAddr = io.req.bits.vaddr & mask
-        io.ptw.ptbr.additionalPgLevels === i && !(maskedVAddr === 0 || maskedVAddr === mask)
+        ptbr.additionalPgLevels === i && !(maskedVAddr === 0 || maskedVAddr === mask)
     }).orR
   } || bad_guest_pa
 
@@ -330,7 +337,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
     Mux(cmd_lrsc, ~0.U(pal_array.getWidth.W), 0.U)
   val ma_ld_array = Mux(misaligned && cmd_read, ~eff_array, 0.U)
   val ma_st_array = Mux(misaligned && cmd_write, ~eff_array, 0.U)
-  val pf_ld_array = Mux(cmd_read, ~((r_array & vr_array) | ptw_ae_array), 0.U)
+  val pf_ld_array = Mux(cmd_read, ~(Mux(hls.v && hls.x, (x_array & vx_array), (r_array & vr_array)) | ptw_ae_array), 0.U)
   val pf_st_array = Mux(cmd_write_perms, ~((w_array & vw_array) | ptw_ae_array), 0.U)
   val pf_inst_array = ~((x_array & vx_array) | ptw_ae_array)
 
@@ -355,7 +362,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   io.resp.pf.ld := (bad_va && cmd_read) || (pf_ld_array & hits).orR
   io.resp.pf.st := (bad_va && cmd_write_perms) || (pf_st_array & hits).orR
   io.resp.pf.inst := bad_va || (pf_inst_array & hits).orR
-  io.resp.pf.v := priv_v & (bad_guest_pa | (cmd_read & (~vr_array & hits).orR) | (cmd_write_perms & (~vw_array & hits).orR) | (~vx_array & hits).orR)
+  io.resp.pf.v := priv_v & (bad_guest_pa | (cmd_read & (~Mux(hls.v && hls.x, x_array, vr_array) & hits).orR) | (cmd_write_perms & (~vw_array & hits).orR) | (~vx_array & hits).orR)
   io.resp.pf.gpaddr := Mux(io.resp.pf.v, Cat(gppn, io.req.bits.vaddr(pgIdxBits-1, 0)), 0.U)
   io.resp.ae.ld := (ae_ld_array & hits).orR
   io.resp.ae.st := (ae_st_array & hits).orR
@@ -372,13 +379,18 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   io.ptw.req.valid := state === s_request
   io.ptw.req.bits.valid := !io.kill
   io.ptw.req.bits.bits.addr := r_refill_tag
+  io.ptw.req.bits.bits.do_stage1 := stage1_enbl
+  io.ptw.req.bits.bits.do_stage2 := stage2_enbl
+  io.ptw.req.bits.bits.priv_v := priv_v
 
   if (usingVM) {
     val sfence = io.sfence.valid
     when (io.req.fire() && tlb_miss) {
       state := s_request
       r_refill_tag := vpn
-
+      r_stage1_enbl := stage1_enbl
+      r_stage2_enbl := stage2_enbl
+      r_priv_v := priv_v
       r_superpage_repl_addr := replacementEntry(superpage_entries, superpage_plru.replace)
       r_sectored_repl_addr := replacementEntry(sectored_entries, sectored_plru.replace)
       r_sectored_hit_addr := OHToUInt(sector_hits)
