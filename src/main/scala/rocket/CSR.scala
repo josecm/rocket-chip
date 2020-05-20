@@ -486,7 +486,7 @@ class CSRFile(
   val reg_hgeip = Reg(UInt(xLen.W))
   val reg_hgeie = Reg(UInt(xLen.W))
   val reg_htval = Reg(UInt(width = vaddrBitsExtended))
-  val read_hie = reg_mie & read_mideleg & hs_delegable_interrupts
+  val read_hie = reg_mie & hs_delegable_interrupts
 
   val reg_vsstatus = Reg(init=new MStatus().fromBits(0)) // initializes to zero
   val (reg_vstvec, read_vstvec) = {
@@ -530,7 +530,7 @@ class CSRFile(
  // io.interrupts.vseip.foreach { mip.vseip := reg_mip.vseip || _ } 
   mip.rocc := io.rocc_interrupt
   val read_mip = mip.asUInt & supported_interrupts
-  val read_hip = read_mip & read_mideleg & hs_delegable_interrupts
+  val read_hip = read_mip & hs_delegable_interrupts
   val high_interrupts = io.interrupts.buserror.map(_ << CSR.busErrorIntCause).getOrElse(0.U)
 
   val pending_interrupts = high_interrupts | (read_mip & reg_mie)
@@ -1091,10 +1091,8 @@ class CSRFile(
         reg_mip.stip := new_mip.stip
         reg_mip.seip := new_mip.seip
       }
-      if (usingVM) {
+      if (usingHype) {
         reg_mip.vssip := new_mip.vssip
-        reg_mip.vstip := new_mip.vstip
-        reg_mip.vseip := new_mip.vseip
       }
     }
     when (decoded_addr(CSRs.mie))      { reg_mie := wdata & supported_interrupts }
@@ -1234,7 +1232,7 @@ class CSRFile(
       }
 
       when (decoded_addr(CSRs.vsip)) {
-        val new_vsip = new MIP().fromBits((read_hip & ~read_hideleg ) | (wdata & read_mideleg & read_hideleg))
+        val new_vsip = new MIP().fromBits((read_hip & ~read_hideleg ) | (wdata & read_hideleg))
         reg_mip.vssip := new_vsip.vssip
       }
 
