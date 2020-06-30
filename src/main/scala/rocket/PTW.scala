@@ -331,6 +331,12 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
       pte
   }
 
+  def makePTE(ppn: UInt, default: PTE) = {
+    val pte = Wire(init = default)
+    pte.ppn := ppn
+    pte
+  }
+
   val ptbr = Mux(priv_v, io.dpath.gptbr, io.dpath.ptbr)
 
   switch (state) {
@@ -351,7 +357,10 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
      }.otherwise {
         aux_count := count
         count := pgLevels - minPgLevels - io.dpath.hptbr.additionalPgLevels
-        aux_pte := r_pte
+        aux_pte := Mux(!s2_final, r_pte, {
+          val s1_ppns = (0 until pgLevels-1).map(i => Cat(r_pte.ppn(r_pte.ppn.getWidth-1, (pgLevels-i-1)*pgLevelBits), r_req.addr((pgLevels-i-1)*pgLevelBits-1,0))) :+ r_pte.ppn
+          makePTE(s1_ppns(count), r_pte)
+        })
         stage2 := true.B
         next_state := s_req
       }        
@@ -386,15 +395,12 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     }
   }
 
-  def makePTE(ppn: UInt, default: PTE) = {
-    val pte = Wire(init = default)
-    pte.ppn := ppn
-    pte
-  }
+  val superpage_masks = (0 until pgLevels).map(i => ~(((1 << ((pgLevels-1-i)*pgLevelBits)) - 1)).U(new PTE().ppn.getWidth.W))
 
   val merged_pte = {
     val s1_ppns = (0 until pgLevels-1).map(i => Cat(pte.ppn(pte.ppn.getWidth-1, (pgLevels-i-1)*pgLevelBits), aux_pte.ppn((pgLevels-i-1)*pgLevelBits-1,0))) :+ pte.ppn
-    val pte_temp = makePTE(s1_ppns(count), aux_pte)
+    val ppn_tmp = Mux(s2_final, s1_ppns(count) & superpage_masks(max_count), s1_ppns(count))
+    val pte_temp = makePTE(ppn_tmp, aux_pte)
     pte_temp.v := aux_pte.v & pte.v
     pte_temp
   }
@@ -445,17 +451,23 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
   }
 
   when(Bool(usingHype) && mem_resp_valid && !traverse) {
-    
-    when(stage2){
-        aux_pte := makePTE(aux_pte.ppn ,pte)
+
+    val ae = !stage2 && do_both_stages && !pte.v
+    val gae = (!stage2 && do_both_stages && pte.v && invalid_paddr) || (stage2 && !s2_final && !pte.ur())
+
+    when(s2_final) {
+      aux_pte := makePTE(aux_pte.ppn & superpage_masks(max_count), pte)
     }
 
-    val ae = !pte.v && do_both_stages && !stage2
-    val gae = Mux(stage2, !(pte.v && pte.ur() | s2_final), pte.v && invalid_paddr && do_both_stages)
-    //for a guest "access execption" return a valid s2 pte with no permissions
-    // essentially resulting in a invalid pte and leading to a guest page fault in the tlb
-    when(ae | gae) {
-        when(gae) { aux_pte.v := false.B } 
+    when(gae) { 
+      aux_pte.v := false.B 
+    } 
+
+    when(ae) {
+      aux_pte := fullPermPTE
+    }
+
+    when(ae || gae) {
         next_state := s_ready
         resp_valid(r_req_dest) := true
     } 

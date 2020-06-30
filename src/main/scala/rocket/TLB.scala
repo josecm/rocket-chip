@@ -101,9 +101,10 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
     if (superpage && usingVM) {
       var tagMatch = valid.head & virtualMatch(0, vs1, vs2)
       for (j <- 0 until pgLevels) {
-        val base = vpnBits - (j + 1) * pgLevelBits
+        val base = vpnBits - (j + 1) * pgLevelBits - 2
+        val top = base + pgLevelBits - 1 + { if (j == 0) 2 else 0 }
         val ignore = level < j || superpageOnly && j == pgLevels - 1
-        tagMatch = tagMatch && (ignore || tag(base + pgLevelBits - 1, base) === vpn(base + pgLevelBits - 1, base))
+        tagMatch = tagMatch && (ignore || tag(top, base) === vpn(top, base))
       }
       tagMatch
     } else {
@@ -362,7 +363,8 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   io.resp.pf.ld := (bad_va && cmd_read) || (pf_ld_array & hits).orR
   io.resp.pf.st := (bad_va && cmd_write_perms) || (pf_st_array & hits).orR
   io.resp.pf.inst := bad_va || (pf_inst_array & hits).orR
-  io.resp.pf.v := priv_v & (bad_guest_pa | (cmd_read & (~Mux(hls.v && hls.x, x_array, vr_array) & hits).orR) | (cmd_write_perms & (~vw_array & hits).orR) | (~vx_array & hits).orR)
+  io.resp.pf.v := priv_v & (bad_guest_pa | (cmd_read & (~Mux(hls.v && hls.x, vx_array, vr_array) & hits).orR) | 
+    (cmd_write_perms & (~vw_array & hits).orR) | (~vx_array & hits).orR) & (io.resp.pf.ld | io.resp.pf.st | (io.resp.pf.inst & instruction))
   io.resp.pf.gpaddr := Mux(io.resp.pf.v, Cat(gppn, io.req.bits.vaddr(pgIdxBits-1, 0)), 0.U)
   io.resp.ae.ld := (ae_ld_array & hits).orR
   io.resp.ae.st := (ae_st_array & hits).orR
