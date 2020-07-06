@@ -381,9 +381,9 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   io.ptw.req.valid := state === s_request
   io.ptw.req.bits.valid := !io.kill
   io.ptw.req.bits.bits.addr := r_refill_tag
-  io.ptw.req.bits.bits.do_stage1 := stage1_enbl
-  io.ptw.req.bits.bits.do_stage2 := stage2_enbl
-  io.ptw.req.bits.bits.priv_v := priv_v
+  io.ptw.req.bits.bits.do_stage1 := r_stage1_enbl
+  io.ptw.req.bits.bits.do_stage2 := r_stage2_enbl
+  io.ptw.req.bits.bits.priv_v := r_priv_v
 
   if (usingVM) {
     val sfence = io.sfence.valid
