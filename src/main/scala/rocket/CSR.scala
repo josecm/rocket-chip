@@ -1163,7 +1163,7 @@ class CSRFile(
                 if (asIdBits > 0) reg_satp.asid := new_satp.asid(asIdBits-1,0)
                 }
             }
-            when (decoded_addr(CSRs.sie))      { reg_mie := (reg_mie & ~read_mideleg) | (wdata & read_mideleg) }
+            when (decoded_addr(CSRs.sie))      { reg_mie := (reg_mie & (~read_mideleg | hs_delegable_interrupts)) | (wdata & (read_mideleg & ~hs_delegable_interrupts)) }
             when (decoded_addr(CSRs.sscratch)) { reg_sscratch := wdata }
             when (decoded_addr(CSRs.sepc))     { reg_sepc := formEPC(wdata) }
             when (decoded_addr(CSRs.stvec))    { reg_stvec := wdata }
