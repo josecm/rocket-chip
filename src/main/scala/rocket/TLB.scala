@@ -140,11 +140,16 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
   }
 
   def invalidate() { valid.foreach(_ := false) }
-  def invalidateVPN(vpn: UInt) {
+  def invalidateVPN(vpn: UInt, vs1: Bool = 0.B, vs2: Bool = 0.B) {
     if (superpage) {
-      when (hit(vpn)) { invalidate() }
+      when (hit(vpn, vs1, vs2)) { invalidate() }
     } else {
-      when (sectorTagMatch(vpn)) { valid(sectorIdx(vpn)) := false }
+      when (sectorTagMatch(vpn)) { 
+        val idx = sectorIdx(vpn)
+        when(virtualMatch(idx, vs1, vs1)) {
+          valid(idx) := false 
+        }
+      }
 
       // For fragmented superpage mappings, we assume the worst (largest)
       // case, and zap entries whose most-significant VPNs match
@@ -413,7 +418,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
     when (sfence) {
       assert(!io.sfence.bits.rs1 || (io.sfence.bits.addr >> pgIdxBits) === vpn)
       for (e <- all_entries) {
-        when (io.sfence.bits.rs1) { e.invalidateVPN(vpn) }
+        when (io.sfence.bits.rs1) { e.invalidateVPN(vpn, stage1_enbl & priv_v, stage2_enbl) }
         .elsewhen (io.sfence.bits.rs2) { e.invalidateNonGlobal() }
         .otherwise { e.invalidate() }
       }
