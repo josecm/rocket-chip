@@ -5,7 +5,8 @@ package freechips.rocketchip.rocket
 
 import Chisel._
 import Chisel.ImplicitConversions._
-import chisel3.experimental._
+import chisel3.withClock
+import chisel3.experimental.{chiselName, NoChiselNamePrefix}
 import freechips.rocketchip.config.Parameters
 import freechips.rocketchip.tile._
 import freechips.rocketchip.util._
@@ -18,6 +19,7 @@ case class RocketCoreParams(
   bootFreqHz: BigInt = 0,
   useVM: Boolean = true,
   useUser: Boolean = false,
+  useSupervisor: Boolean = false,
   useHype: Boolean = false,
   useDebug: Boolean = true,
   useAtomics: Boolean = true,
@@ -113,7 +115,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     if (!rocketParams.clockGate) clock
     else ClockGate(clock, clock_en, "rocket_clock_gate")
 
-  @chiselName class RocketImpl { // entering gated-clock domain
+  @chiselName class RocketImpl extends NoChiselNamePrefix { // entering gated-clock domain
 
   // performance counters
   def pipelineIDToWB[T <: Data](x: T): T =
@@ -172,7 +174,8 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     (usingRoCC.option(new RoCCDecode)) ++:
     (rocketParams.useSCIE.option(new SCIEDecode)) ++:
     (if (xLen == 32) new I32Decode else new I64Decode) +:
-    (usingVM.option(new SDecode)) ++:
+    (usingVM.option(new SVMDecode)) ++:
+    (usingSupervisor.option(new SDecode)) ++:
     (usingHype.option(new HDecode)) ++:
     ((usingHype && (xLen == 64)).option(new H64Decode)) ++:
     (usingDebug.option(new DebugDecode)) ++:
@@ -283,7 +286,6 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val id_csr = Mux(id_csr_ren, CSR.R, id_ctrl.csr)
   val id_sfence = id_ctrl.mem && id_ctrl.mem_cmd === M_SFENCE
   val id_csr_flush = id_sfence || id_system_insn || (id_csr_en && !id_csr_ren && csr.io.decode(0).write_flush)
-
 
   val id_scie_decoder = if (!rocketParams.useSCIE) Wire(new SCIEDecoderInterface) else {
     val d = Module(new SCIEDecoder)
@@ -609,7 +611,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     wb_reg_raw_inst := mem_reg_raw_inst
     wb_reg_mem_size := mem_reg_mem_size
     wb_reg_pc := mem_reg_pc
-    wb_reg_wphit := mem_reg_wphit | bpu.io.bpwatch.map { bpw => bpw.dvalid(0) }
+    wb_reg_wphit := mem_reg_wphit | bpu.io.bpwatch.map { bpw => (bpw.rvalid(0) && mem_reg_load) || (bpw.wvalid(0) && mem_reg_store) }
 
   }
 
@@ -855,6 +857,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   io.dmem.req.bits.signed := !Mux(ex_hls.v, ex_reg_inst(20), ex_reg_inst(14)) 
   io.dmem.req.bits.phys := Bool(false)
   io.dmem.req.bits.addr := encodeVirtualAddress(ex_rs(0), alu.io.adder_out)
+  io.dmem.req.bits.dprv := csr.io.status.dprv
   io.dmem.req.bits.hls := ex_hls
   io.dmem.s1_data.data := (if (fLen == 0) mem_reg_rs2 else Mux(mem_ctrl.fp, Fill((xLen max fLen) / fLen, io.fpu.store_data), mem_reg_rs2))
   io.dmem.s1_kill := killm_common || mem_ldst_xcpt || fpu_kill_mem
@@ -873,6 +876,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val unpause = csr.io.time(rocketParams.lgPauseCycles-1, 0) === 0 || io.dmem.perf.release || take_pc
   when (unpause) { id_reg_pause := false }
   io.cease := csr.io.status.cease && !clock_en_reg
+  io.wfi := csr.io.status.wfi
   if (rocketParams.clockGate) {
     long_latency_stall := csr.io.csr_stall || io.dmem.perf.blocked || id_reg_pause && !unpause
     clock_en := clock_en_reg || ex_pc_valid || (!long_latency_stall && io.imem.resp.valid)
@@ -899,14 +903,17 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   coreMonitorBundle.timer := csr.io.time(31,0)
   coreMonitorBundle.valid := csr.io.trace(0).valid && !csr.io.trace(0).exception
   coreMonitorBundle.pc := csr.io.trace(0).iaddr(vaddrBitsExtended-1, 0).sextTo(xLen)
-  coreMonitorBundle.wrdst := Mux(rf_wen && !(wb_set_sboard && wb_wen), rf_waddr, UInt(0))
+  coreMonitorBundle.wrenx := wb_wen && !wb_set_sboard
+  coreMonitorBundle.wrenf := false.B
+  coreMonitorBundle.wrdst := wb_waddr
   coreMonitorBundle.wrdata := rf_wdata
-  coreMonitorBundle.wren := rf_wen
   coreMonitorBundle.rd0src := wb_reg_inst(19,15)
   coreMonitorBundle.rd0val := Reg(next=Reg(next=ex_rs(0)))
   coreMonitorBundle.rd1src := wb_reg_inst(24,20)
   coreMonitorBundle.rd1val := Reg(next=Reg(next=ex_rs(1)))
   coreMonitorBundle.inst := csr.io.trace(0).insn
+  coreMonitorBundle.excpt := csr.io.trace(0).exception
+  coreMonitorBundle.priv_mode := csr.io.trace(0).priv
 
   if (enableCommitLog) {
     val t = csr.io.trace(0)
@@ -935,13 +942,19 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     }
   }
   else {
-    printf("C%d: %d [%d] pc=[%x] W[r%d=%x] R[r%d=%x] R[r%d=%x] inst=[%x] DASM(%x)\n",
+    when (csr.io.trace(0).valid) {
+      printf("C%d: %d [%d] pc=[%x] W[r%d=%x][%d] R[r%d=%x] R[r%d=%x] inst=[%x] DASM(%x)\n",
          io.hartid, coreMonitorBundle.timer, coreMonitorBundle.valid,
          coreMonitorBundle.pc,
-         Mux(coreMonitorBundle.wren, coreMonitorBundle.wrdst, UInt(0)), coreMonitorBundle.wrdata,
-         coreMonitorBundle.rd0src, coreMonitorBundle.rd0val,
-         coreMonitorBundle.rd1src, coreMonitorBundle.rd1val,
+         Mux(wb_ctrl.wxd || wb_ctrl.wfd, coreMonitorBundle.wrdst, 0.U),
+         Mux(coreMonitorBundle.wrenx, coreMonitorBundle.wrdata, 0.U),
+         coreMonitorBundle.wrenx,
+         Mux(wb_ctrl.rxs1 || wb_ctrl.rfs1, coreMonitorBundle.rd0src, 0.U),
+         Mux(wb_ctrl.rxs1 || wb_ctrl.rfs1, coreMonitorBundle.rd0val, 0.U),
+         Mux(wb_ctrl.rxs2 || wb_ctrl.rfs2, coreMonitorBundle.rd1src, 0.U),
+         Mux(wb_ctrl.rxs2 || wb_ctrl.rfs2, coreMonitorBundle.rd1val, 0.U),
          coreMonitorBundle.inst, coreMonitorBundle.inst)
+    }
   }
 
   PlusArg.timeout(

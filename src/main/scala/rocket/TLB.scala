@@ -101,8 +101,8 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
     if (superpage && usingVM) {
       var tagMatch = valid.head & virtualMatch(0, vs1, vs2)
       for (j <- 0 until pgLevels) {
-        val base = vpnBits - (j + 1) * pgLevelBits - 2
-        val top = base + pgLevelBits - 1 + { if (j == 0) 2 else 0 }
+        val base = vpnBits - (j + 1) * pgLevelBits - { if (usingHype) 2 else 0 }
+        val top = base + pgLevelBits - 1 + { if (usingHype && j == 0) 2 else 0 }
         val ignore = level < j || superpageOnly && j == pgLevels - 1
         tagMatch = tagMatch && (ignore || tag(top, base) === vpn(top, base))
       }
