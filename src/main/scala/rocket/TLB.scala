@@ -203,7 +203,6 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   val priv_uses_vm = priv <= PRV.S
   val priv_v = Bool(usingHype) && { if (instruction) io.ptw.status.v else (io.ptw.status.v || io.ptw.status.dv || hls.v) }
   val ptbr = Mux(priv_v, io.ptw.gptbr, io.ptw.ptbr)
-  val status = Mux(priv_v, io.ptw.gstatus, io.ptw.status)
   val stage1_enbl = Bool(usingVM) && ptbr.mode(ptbr.mode.getWidth-1)
   val stage2_enbl = Bool(usingHype) && priv_v && io.ptw.hptbr.mode(io.ptw.hptbr.mode.getWidth-1)
   val vm_enabled = (stage1_enbl || stage2_enbl) && priv_uses_vm && !io.req.bits.passthrough
@@ -287,14 +286,16 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   val normal_entries = ordinary_entries.map(_.getData(vpn))
   val nPhysicalEntries = 1 + special_entry.size
   val ptw_ae_array = Cat(false.B, entries.map(_.ae).asUInt)
-  val priv_rw_ok = Mux(!priv_s || status.sum, entries.map(_.u).asUInt, 0.U) | Mux(priv_s, ~entries.map(_.u).asUInt, 0.U)
+  val sum = Mux(priv_v, io.ptw.gstatus.sum, io.ptw.status.sum)
+  val priv_rw_ok = Mux(!priv_s || sum, entries.map(_.u).asUInt, 0.U) | Mux(priv_s, ~entries.map(_.u).asUInt, 0.U)
   val priv_x_ok = Mux(priv_s, ~entries.map(_.u).asUInt, entries.map(_.u).asUInt)
   val stage1_bypass = Fill(entries.size, Bool(usingHype) & !stage1_enbl)
-  val r_array = Cat(true.B, (priv_rw_ok & (entries.map(_.sr).asUInt | Mux(status.mxr, entries.map(_.sx).asUInt, UInt(0)))) | stage1_bypass)
+  val mxr = io.ptw.status.mxr | Mux(priv_v, io.ptw.gstatus.mxr, false.B)
+  val r_array = Cat(true.B, (priv_rw_ok & (entries.map(_.sr).asUInt | Mux(mxr, entries.map(_.sx).asUInt, UInt(0)))) | stage1_bypass)
   val w_array = Cat(true.B, (priv_rw_ok & entries.map(_.sw).asUInt) | stage1_bypass)
   val x_array = Cat(true.B, (priv_x_ok & entries.map(_.sx).asUInt) | stage1_bypass)
   val stage2_bypass = Fill(entries.size, !stage2_enbl)
-  val vr_array = Cat(true.B, entries.map(_.vr).asUInt | stage2_bypass)
+  val vr_array = Cat(true.B, entries.map(_.vr).asUInt | Mux(io.ptw.status.mxr, entries.map(_.vx).asUInt, UInt(0)) | stage2_bypass)
   val vw_array = Cat(true.B, entries.map(_.vw).asUInt | stage2_bypass)
   val vx_array = Cat(true.B, entries.map(_.vx).asUInt | stage2_bypass)
   val pr_array = Cat(Fill(nPhysicalEntries, prot_r), normal_entries.map(_.pr).asUInt) & ~ptw_ae_array
