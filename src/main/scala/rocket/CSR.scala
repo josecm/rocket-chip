@@ -61,7 +61,7 @@ class HStatus extends Bundle {
   val vsxl = UInt(width = 2)
   val zero5 = UInt(width = 9)
   val vtsr = Bool()
-  val zero4 = Bool()
+  val vtw = Bool()
   val vtvm = Bool()
   val zero3 = UInt(width = 2)
   val vgein = UInt(width = 6)
@@ -221,6 +221,8 @@ class CSRDecodeIO extends Bundle {
   val write_illegal = Bool(OUTPUT)
   val write_flush = Bool(OUTPUT)
   val system_illegal = Bool(OUTPUT)
+  val virtual_access_illegal = Bool(OUTPUT)
+  val virtual_system_illegal = Bool(OUTPUT)
   val hls = new HypLoadStore().asOutput
 }
 
@@ -391,6 +393,7 @@ class CSRFile(
     Causes.virtual_supervisor_ecall,
     Causes.fetch_guest_page_fault,
     Causes.load_guest_page_fault,
+    Causes.virtual_instruction,
     Causes.store_guest_page_fault).map(1 << _).sum)
 
   val hs_delegable_exceptions = UInt(Seq(
@@ -737,39 +740,41 @@ class CSRFile(
   val wdata = readModifyWriteCSR(io.rw.cmd, io.rw.rdata, io.rw.wdata)
 
   val system_insn = io.rw.cmd === CSR.I
-  val decode_table = Seq(        SCALL->       List(Y,N,N,N,N,N,N,N),
-                                 SBREAK->      List(N,Y,N,N,N,N,N,N),
-                                 MRET->        List(N,N,Y,N,N,N,N,N),
-                                 CEASE->       List(N,N,N,Y,N,N,N,N),
-                                 WFI->         List(N,N,N,N,Y,N,N,N)) ++
-    usingDebug.option(           DRET->        List(N,N,Y,N,N,N,N,N)) ++
-    coreParams.haveCFlush.option(CFLUSH_D_L1-> List(N,N,N,N,N,N,N,N)) ++
-    usingSupervisor.option(              SRET->        List(N,N,Y,N,N,N,N,N)) ++
-    usingVM.option(              SFENCE_VMA->  List(N,N,N,N,N,Y,N,N)) ++
-    usingHype.option(            HFENCE_GVMA-> List(N,N,N,N,N,Y,N,N)) ++ 
-    usingHype.option(            HLV->         List(N,N,N,N,N,N,Y,N)) ++ 
-    usingHype.option(            HLVX->        List(N,N,N,N,N,N,Y,Y)) ++ 
-    usingHype.option(            HSV->         List(N,N,N,N,N,N,Y,N))
-  val insn_call :: insn_break :: insn_ret :: insn_cease :: insn_wfi :: insn_sfence :: _ :: _ :: Nil =
+  val decode_table = Seq(        SCALL->       List(Y,N,N,N,N,N,N,N,N),
+                                 SBREAK->      List(N,Y,N,N,N,N,N,N,N),
+                                 MRET->        List(N,N,Y,N,N,N,N,N,N),
+                                 CEASE->       List(N,N,N,Y,N,N,N,N,N),
+                                 WFI->         List(N,N,N,N,Y,N,N,N,N)) ++
+    usingDebug.option(           DRET->        List(N,N,Y,N,N,N,N,N,N)) ++
+    coreParams.haveCFlush.option(CFLUSH_D_L1-> List(N,N,N,N,N,N,N,N,N)) ++
+    usingSupervisor.option(      SRET->        List(N,N,Y,N,N,N,N,N,N)) ++
+    usingVM.option(              SFENCE_VMA->  List(N,N,N,N,N,Y,N,N,N)) ++
+    usingHype.option(            HFENCE_GVMA-> List(N,N,N,N,N,N,Y,N,N)) ++
+    usingHype.option(            HLV->         List(N,N,N,N,N,N,N,Y,N)) ++
+    usingHype.option(            HLVX->        List(N,N,N,N,N,N,N,Y,Y)) ++
+    usingHype.option(            HSV->         List(N,N,N,N,N,N,N,Y,N))
+  val insn_call :: insn_break :: insn_ret :: insn_cease :: insn_wfi :: _ :: _ :: _ :: _ :: Nil =
     DecodeLogic(io.rw.addr << 20 | io.rw.addr2 << 12, decode_table(0)._2.map(x=>X), decode_table).map(system_insn && _.asBool)
 
   for (io_dec <- io.decode) {
     def decodeAny(m: LinkedHashMap[Int,Bits]): Bool = m.map { case(k: Int, _: Bits) => io_dec.csr === k }.reduce(_||_)
     def decodeFast(s: Seq[Int]): Bool = DecodeLogic(io_dec.csr, s.map(_.U), (read_mapping -- s).keys.toList.map(_.U))
 
-    val _ :: is_break :: is_ret :: _ :: is_wfi :: is_fence :: is_hlsv :: is_hlx :: Nil =
+    val _ :: is_break :: is_ret :: _ :: is_wfi :: is_sfence :: is_hfence :: is_hlsv :: is_hlx :: Nil =
       DecodeLogic(io_dec.csr << 20 | io_dec.minopcode << 12, decode_table(0)._2.map(x=>X), decode_table).map(_.asBool)
+    val is_fence = is_sfence || is_hfence
+    val is_counter = (io_dec.csr.inRange(CSR.firstCtr, CSR.firstCtr + CSR.nCtr) || io_dec.csr.inRange(CSR.firstCtrH, CSR.firstCtrH + CSR.nCtr))
 
-    val allow_wfi = Bool(!usingSupervisor) || reg_mstatus.prv > PRV.S || (!reg_mstatus.v && !reg_mstatus.tw)
+    val allow_wfi = Bool(!usingSupervisor) || reg_mstatus.prv > PRV.S || !reg_mstatus.tw && (!reg_mstatus.v || !reg_hstatus.vtw)
     val allow_sfence_vma = Bool(!usingVM) || reg_mstatus.prv > PRV.S || 
-                            (Bool(usingVM) && !reg_mstatus.v && !reg_mstatus.tvm )  ||
-                            (Bool(usingHype) && reg_mstatus.v && !reg_hstatus.vtvm)
+                            (!reg_mstatus.v && !reg_mstatus.tvm ) || (Bool(usingHype) && reg_mstatus.v && !reg_hstatus.vtvm)
     val allow_hlsv = Bool(usingHype) && !reg_mstatus.v && (reg_mstatus.prv >= PRV.S || reg_hstatus.hu)
-    val allow_sret = Bool(!usingSupervisor) || reg_mstatus.prv > PRV.S || (!reg_mstatus.v && !reg_mstatus.tsr) || (reg_mstatus.v && !reg_hstatus.vtsr)
+    val allow_sret = Bool(!usingSupervisor) || reg_mstatus.prv > PRV.S ||
+                            (!reg_mstatus.v && !reg_mstatus.tsr) || (Bool(usingHype) && reg_mstatus.v && !reg_hstatus.vtsr)
     val counter_addr = io_dec.csr(log2Ceil(read_mcounteren.getWidth)-1, 0)
     val allow_counter = (reg_mstatus.prv > PRV.S || read_mcounteren(counter_addr)) &&
-      (!usingSupervisor || reg_mstatus.prv >= PRV.S || read_scounteren(counter_addr))
-      //need to add hypervisor counters here
+      (!usingSupervisor || reg_mstatus.prv >= PRV.S || read_scounteren(counter_addr)) &&
+      (!usingHype || !reg_mstatus.v || read_hcounteren(counter_addr))
     io_dec.fp_illegal := (reg_mstatus.v && io.status.fs === 0 && reg_vsstatus.fs === 0) ||
                          (!reg_mstatus.v && io.status.fs === 0) ||
                           !reg_misa('f'-'a') 
@@ -779,7 +784,7 @@ class CSRFile(
     io_dec.read_illegal := csrPrivilege(reg_mstatus.prv, reg_mstatus.v) < io_dec.csr(9,8) ||
       !decodeAny(read_mapping) ||
       ((io_dec.csr === CSRs.satp || io_dec.csr === CSRs.hgatp) && !allow_sfence_vma) ||
-      (io_dec.csr.inRange(CSR.firstCtr, CSR.firstCtr + CSR.nCtr) || io_dec.csr.inRange(CSR.firstCtrH, CSR.firstCtrH + CSR.nCtr)) && !allow_counter ||
+      is_counter && !allow_counter ||
       decodeFast(debug_csrs.keys.toList) && !reg_debug ||
       decodeFast(vector_csrs.keys.toList) && io_dec.vector_illegal ||
       io_dec.fp_csr && io_dec.fp_illegal
@@ -798,6 +803,16 @@ class CSRFile(
     io_dec.hls.v := is_hlsv
     io_dec.hls.x := is_hlx
     io_dec.hls.dprv := reg_hstatus.spvp
+
+    io_dec.virtual_access_illegal := Bool(usingHype) && reg_mstatus.v && ((io_dec.csr(9,8) === PRV.H) ||
+      (is_counter && read_mcounteren(counter_addr) && !read_hcounteren(counter_addr))
+      (!reg_mstatus.prv(0) && io_dec.csr(9,8) === PRV.S) ||
+      (reg_mstatus.prv(0) && (io_dec.csr === CSRs.satp && reg_hstatus.vtvm)))
+
+    io_dec.virtual_system_illegal := Bool(usingHype) && reg_mstatus.v && (is_hfence || is_hlsv ||
+      (!reg_mstatus.prv(0) && (is_wfi || is_ret || is_sfence)) ||
+      (reg_mstatus.prv(0) && ((is_wfi && !reg_mstatus.tw && reg_hstatus.vtw) ||
+      (is_ret && reg_hstatus.vtsr) || (is_sfence && reg_hstatus.vtvm))))
   }
 
   val cause =
@@ -1195,6 +1210,7 @@ class CSRFile(
           reg_hstatus.hu := new_hstatus.hu
           reg_hstatus.vgein := new_hstatus.vgein
           reg_hstatus.vtvm := new_hstatus.vtvm
+          reg_hstatus.vtw := new_hstatus.vtw
           reg_hstatus.vtsr := new_hstatus.vtsr
           reg_hstatus.vsxl := new_hstatus.vsxl
       }

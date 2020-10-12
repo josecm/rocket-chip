@@ -306,6 +306,8 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     id_ctrl.scie && !(id_scie_decoder.unpipelined || id_scie_decoder.pipelined) ||
     id_csr_en && (csr.io.decode(0).read_illegal || !id_csr_ren && csr.io.decode(0).write_illegal) ||
     !ibuf.io.inst(0).bits.rvc && ((id_sfence || id_system_insn) && csr.io.decode(0).system_illegal)
+  val id_virtual_insn = id_csr_en && csr.io.decode(0).virtual_access_illegal ||
+    !ibuf.io.inst(0).bits.rvc && ((id_sfence || id_system_insn) && csr.io.decode(0).virtual_system_illegal)
   // stall decode for fences (now, for AMO.rl; later, for AMO.aq and FENCE)
   val id_amo_aq = id_inst(0)(26)
   val id_amo_rl = id_inst(0)(25)
@@ -341,7 +343,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     (id_xcpt0.ae.inst, UInt(Causes.fetch_access)),
     (id_xcpt1.pf.inst, Mux(id_xcpt1.pf.v, UInt(Causes.fetch_guest_page_fault), UInt(Causes.fetch_page_fault))),
     (id_xcpt1.ae.inst, UInt(Causes.fetch_access)),
-    (id_illegal_insn,  UInt(Causes.illegal_instruction))))
+    (id_illegal_insn,  Mux(id_virtual_insn, UInt(Causes.virtual_instruction), UInt(Causes.illegal_instruction)))))
 
   ex_reg_gpaddr := id_xcpt0.pf.gpaddr
 

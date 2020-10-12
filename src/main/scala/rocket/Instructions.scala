@@ -773,6 +773,7 @@ object Causes {
 
   val fetch_guest_page_fault = 0x14
   val load_guest_page_fault  = 0x15
+  val virtual_instruction  = 0x16
   val store_guest_page_fault  = 0x17
 
   val all = {
@@ -794,6 +795,7 @@ object Causes {
     res += store_page_fault
     res += fetch_guest_page_fault
     res += load_guest_page_fault
+    res += virtual_instruction
     res += store_guest_page_fault
     res.toArray
   }
