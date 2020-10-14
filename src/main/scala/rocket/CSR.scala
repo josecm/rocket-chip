@@ -749,6 +749,7 @@ class CSRFile(
     coreParams.haveCFlush.option(CFLUSH_D_L1-> List(N,N,N,N,N,N,N,N,N)) ++
     usingSupervisor.option(      SRET->        List(N,N,Y,N,N,N,N,N,N)) ++
     usingVM.option(              SFENCE_VMA->  List(N,N,N,N,N,Y,N,N,N)) ++
+    usingHype.option(            HFENCE_VVMA-> List(N,N,N,N,N,N,Y,N,N)) ++
     usingHype.option(            HFENCE_GVMA-> List(N,N,N,N,N,N,Y,N,N)) ++
     usingHype.option(            HLV->         List(N,N,N,N,N,N,N,Y,N)) ++
     usingHype.option(            HLVX->        List(N,N,N,N,N,N,N,Y,Y)) ++

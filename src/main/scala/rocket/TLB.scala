@@ -26,6 +26,8 @@ class SFenceReq(implicit p: Parameters) extends CoreBundle()(p) {
   val rs2 = Bool()
   val addr = UInt(width = vaddrBits)
   val asid = UInt(width = asIdBits max 1) // TODO zero-width
+  val hv = Bool()
+  val hg = Bool()
 }
 
 class TLBReq(lgMaxSize: Int)(implicit p: Parameters) extends CoreBundle()(p) {
@@ -97,7 +99,8 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
   def sectorHit(vpn: UInt) = valid.orR && sectorTagMatch(vpn)
   def sectorTagMatch(vpn: UInt) = ((tag ^ vpn) >> nSectors.log2) === 0
   def virtualMatch(idx: UInt, vs1: Bool, vs2: Bool) = (vstage1(idx) === vs1) && (vstage2(idx) === vs2)
-  def hit(vpn: UInt, vs1: Bool = 0.B, vs2: Bool = 0.B) = {
+  def virtualMatchAny(idx: UInt, vs1: Bool = true, vs2: Bool= true) = (vstage1(idx) === vs1) || (vstage2(idx) === vs2)
+  def hit(vpn: UInt, vs1: Bool, vs2: Bool, virtualMatch: (UInt, Bool, Bool) => Bool) = {
     if (superpage && usingVM) {
       var tagMatch = valid.head & virtualMatch(0, vs1, vs2)
       for (j <- 0 until pgLevels) {
@@ -112,6 +115,8 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
       valid(idx) && sectorTagMatch(vpn) && virtualMatch(idx, vs1, vs2)
     }
   }
+  def hit(vpn: UInt, vs1: Bool, vs2: Bool): Bool = hit(vpn, vs1, vs2, virtualMatch)
+  def hitVirtual(vpn: UInt) = hit(vpn, true, true, virtualMatchAny)
   def ppn(vpn: UInt, guest: Boolean = false) = {
     val data = getData(vpn)
     val ppn = if(guest) data.gppn else data.ppn
@@ -128,7 +133,7 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
     }
   }
 
-  def insert(tag: UInt, level: UInt, entry: TLBEntryData, vs1: Bool = 0.B, vs2: Bool = 0.B) {
+  def insert(tag: UInt, level: UInt, entry: TLBEntryData, vs1: Bool, vs2: Bool) {
     this.tag := tag
     this.level := level.extract(log2Ceil(pgLevels - superpageOnly.toInt)-1, 0)
 
@@ -140,13 +145,17 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
   }
 
   def invalidate() { valid.foreach(_ := false) }
-  def invalidateVPN(vpn: UInt, vs1: Bool = 0.B, vs2: Bool = 0.B) {
+  def invalidate(virtual: Bool) {
+    for((v, idx) <- valid.zipWithIndex)
+       when(!(virtual ^ virtualMatchAny(idx))) { v := false }
+  }
+  def invalidateVPN(vpn: UInt, virtual: Bool) {
     if (superpage) {
-      when (hit(vpn, vs1, vs2)) { invalidate() }
+      when(!(virtual ^ hitVirtual(vpn))) { invalidate() }
     } else {
       when (sectorTagMatch(vpn)) { 
         val idx = sectorIdx(vpn)
-        when(virtualMatch(idx, vs1, vs1)) {
+        when(!(virtual ^ virtualMatchAny(idx))) {
           valid(idx) := false 
         }
       }
@@ -154,14 +163,14 @@ class TLBEntry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boo
       // For fragmented superpage mappings, we assume the worst (largest)
       // case, and zap entries whose most-significant VPNs match
       when (((tag ^ vpn) >> (pgLevelBits * (pgLevels - 1))) === 0) {
-        for ((v, e) <- valid zip entry_data)
-          when (e.fragmented_superpage) { v := false }
+        for (((v, e), idx) <- (valid zip entry_data) zipWithIndex)
+          when (!(virtual ^ virtualMatchAny(idx)) && e.fragmented_superpage) { v := false }
       }
     }
   }
-  def invalidateNonGlobal() {
-    for ((v, e) <- valid zip entry_data)
-      when (!e.g) { v := false }
+  def invalidateNonGlobal(virtual: Bool) {
+    for (((v, e), idx) <- (valid zip entry_data) zipWithIndex)
+      when (!(virtual ^ virtualMatchAny(idx)) && !e.g) { v := false }
   }
 }
 
@@ -419,9 +428,10 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
     when (sfence) {
       assert(!io.sfence.bits.rs1 || (io.sfence.bits.addr >> pgIdxBits) === vpn)
       for (e <- all_entries) {
-        when (io.sfence.bits.rs1) { e.invalidateVPN(vpn, stage1_enbl & priv_v, stage2_enbl) }
-        .elsewhen (io.sfence.bits.rs2) { e.invalidateNonGlobal() }
-        .otherwise { e.invalidate() }
+        val virtual = priv_v || io.sfence.bits.hv || io.sfence.bits.hg
+        when (io.sfence.bits.rs1) { e.invalidateVPN(vpn, virtual) }
+        .elsewhen (io.sfence.bits.rs2) { e.invalidateNonGlobal(virtual) }
+        .otherwise { e.invalidate(virtual) }
       }
     }
     when (multipleHits || reset) {
