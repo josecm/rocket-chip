@@ -90,7 +90,7 @@ class PTE(implicit p: Parameters) extends CoreBundle()(p) {
 class L2TLBEntry(implicit p: Parameters) extends CoreBundle()(p)
     with HasCoreParameters {
   val idxBits = log2Ceil(coreParams.nL2TLBEntries)
-  val tagBits = vpnBits - idxBits + coreParams.useHype.toInt
+  val tagBits = vpnBits - idxBits + { if(usingHype) 2 else 0 }
   val tag = UInt(width = tagBits)
   val ppn = UInt(width = ppnBits)
   val d = Bool()
@@ -99,6 +99,7 @@ class L2TLBEntry(implicit p: Parameters) extends CoreBundle()(p)
   val x = Bool()
   val w = Bool()
   val r = Bool()
+  val s2 = new PTE()
 
   override def cloneType = new L2TLBEntry().asInstanceOf[this.type]
 }
@@ -179,8 +180,9 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
       val vpn_idx = vpn_idxs(count)
       Cat(r_pte.ppn, vpn_idx) << log2Ceil(xLen/8)
     })
+  val pte_addr_s1 = Reg(init = pte_addr)
   
-  //TODO check this
+  //TODO: 2-stage stage translation is not supporting framgemented superpages
   val fragmented_superpage_ppn = {
     val choices = (pgLevels-1 until 0 by -1).map(i => Cat(r_pte.ppn >> (pgLevelBits*i), r_req.addr(((pgLevelBits*i) min vpnBits)-1, 0).padTo(pgLevelBits*i)))
     choices(count)
@@ -195,19 +197,21 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     val size = 1 << log2Up(pgLevels * 2)
     val plru = new PseudoLRU(size)
     val valid = RegInit(0.U(size.W))
-    val tags = Reg(Vec(size, UInt(width = paddrBits + { if(usingHype) 2 else 0 } )))
+    val tags = Reg(Vec(size, UInt(width = pte_addr.getWidth + { if(usingHype) 1 else 0 } )))
     val data = Reg(Vec(size, UInt(width = ppnBits)))
-    val tagged_pte_addr = Cat(do_stage1 & priv_v, do_stage2, pte_addr)
+    val virtual_access = do_stage2 & !stage2
+    val tagged_pte_addr = Cat(virtual_access, pte_addr)
+    val refill_tagged_pte_addr = Mux(virtual_access, Cat(1.U, pte_addr_s1), Cat(0.U(1.W), pte_addr))
 
     val hits = tags.map(_ === tagged_pte_addr).asUInt & valid
     val hit = hits.orR
     when (mem_resp_valid && traverse && !hit && !invalidated) {
       val r = Mux(valid.andR, plru.replace, PriorityEncoder(~valid))
       valid := valid | UIntToOH(r)
-      tags(r) := tagged_pte_addr
+      tags(r) := refill_tagged_pte_addr
       data(r) := pte.ppn
     }
-    when (hit && state === s_req) { plru.access(OHToUInt(hits)) }
+    when (hit && (state === s_req || state === s_switch)) { plru.access(OHToUInt(hits)) }
     when (io.dpath.sfence.valid && !io.dpath.sfence.bits.rs1) { valid := 0.U }
 
     for (i <- 0 until pgLevels-1)
@@ -218,7 +222,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
 
   val l2_refill = RegNext(false.B)
   io.dpath.perf.l2miss := false
-  val (l2_hit, l2_error, l2_pte, l2_tlb_ram) = if (coreParams.nL2TLBEntries == 0) (false.B, false.B, Wire(new PTE), None) else {
+  val (l2_hit, l2_error, l2_pte, l2_pte_s2, l2_tlb_ram) = if (coreParams.nL2TLBEntries == 0) (false.B, false.B, Wire(new PTE), Wire(new PTE), None) else {
     val code = new ParityCode
     require(isPow2(coreParams.nL2TLBEntries))
     val idxBits = log2Ceil(coreParams.nL2TLBEntries)
@@ -230,23 +234,28 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
       data = UInt(width = code.width(new L2TLBEntry().getWidth))
     )
 
-    val g = Reg(UInt(width = coreParams.nL2TLBEntries)) //TODO what is this?
+    val g = Reg(UInt(width = coreParams.nL2TLBEntries))
+    val virtual = Reg(UInt(width = coreParams.nL2TLBEntries))
     val valid = RegInit(UInt(0, coreParams.nL2TLBEntries))
-    val (r_tag, r_idx) = Split(Cat(priv_v, r_req.addr), idxBits)
+    val (r_tag, r_idx) = Split(Cat(do_stage1, do_stage2, r_req.addr), idxBits)
     when (l2_refill && !invalidated) {
       val entry = Wire(new L2TLBEntry)
       entry := r_pte
+      entry.s2 := aux_pte
       entry.tag := r_tag
       ram.write(r_idx, code.encode(entry.asUInt))
 
       val mask = UIntToOH(r_idx)
       valid := valid | mask
       g := Mux(r_pte.g, g | mask, g & ~mask)
+      virtual := Mux(priv_v, virtual | mask, virtual & ~mask)
     }
+    
     when (io.dpath.sfence.valid) {
+      val virtual_match = ~(Fill(coreParams.nL2TLBEntries, io.dpath.sfence.bits.hg || io.dpath.sfence.bits.hv || priv_v) ^ virtual)
       valid :=
-        Mux(io.dpath.sfence.bits.rs1, valid & ~UIntToOH(io.dpath.sfence.bits.addr(idxBits+pgIdxBits-1, pgIdxBits)),
-        Mux(io.dpath.sfence.bits.rs2, valid & g, 0.U))
+        Mux(io.dpath.sfence.bits.rs1, valid & ~(UIntToOH(io.dpath.sfence.bits.addr(idxBits+pgIdxBits-1, pgIdxBits)) & virtual_match),
+        Mux(io.dpath.sfence.bits.rs2, valid & (g | ~virtual_match), 0.U))
     }
 
     val s0_valid = !l2_refill && arb.io.out.fire()
@@ -262,13 +271,15 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     val s2_hit = s2_valid && s2_valid_bit && r_tag === s2_entry.tag
     io.dpath.perf.l2miss := s2_valid && !(s2_valid_bit && r_tag === s2_entry.tag)
     val s2_pte = Wire(new PTE)
+    val s2_pte_s2 = Wire(new PTE)
     s2_pte := s2_entry
     s2_pte.g := s2_g
     s2_pte.v := true
+    s2_pte_s2 := s2_entry.s2
 
     ccover(s2_hit, "L2_TLB_HIT", "L2 TLB hit")
 
-    (s2_hit, s2_rdata.error, s2_pte, Some(ram))
+    (s2_hit, s2_rdata.error, s2_pte, s2_pte_s2, Some(ram))
   }
 
   // if SFENCE occurs during walk, don't refill PTE cache or L2 TLB until next walk
@@ -363,6 +374,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
           val s1_ppns = (0 until pgLevels-1).map(i => Cat(r_pte.ppn(r_pte.ppn.getWidth-1, (pgLevels-i-1)*pgLevelBits), r_req.addr((pgLevels-i-1)*pgLevelBits-1,0))) :+ r_pte.ppn
           makePTE(s1_ppns(count), r_pte)
         })
+        pte_addr_s1 := pte_addr
         stage2 := true.B
         next_state := s_req
       }        
@@ -376,6 +388,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     }
     is (s_wait1) {
       // This Mux is for the l2_error case; the l2_hit && !l2_error case is overriden below
+      // TODO: need to check if this works correclty with the extra s_switch state
       next_state := Mux(l2_hit, s_req, s_wait2)
     }
     is (s_wait2) {
@@ -422,6 +435,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     next_state := s_ready
     resp_valid(r_req_dest) := true
     resp_ae := false
+    aux_pte := l2_pte_s2
     count := pgLevels-1
   }
   when (mem_resp_valid) {
