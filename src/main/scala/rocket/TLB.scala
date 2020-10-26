@@ -328,7 +328,7 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
         val maskedVAddr = io.req.bits.vaddr & mask
         ptbr.additionalPgLevels === i && !(maskedVAddr === 0 || maskedVAddr === mask)
     }).orR
-  } || bad_guest_pa
+  }
 
   val cmd_lrsc = Bool(usingAtomics) && io.req.bits.cmd.isOneOf(M_XLR, M_XSC)
   val cmd_amo_logical = Bool(usingAtomics) && isAMOLogical(io.req.bits.cmd)
@@ -353,9 +353,12 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
     Mux(cmd_lrsc, ~0.U(pal_array.getWidth.W), 0.U)
   val ma_ld_array = Mux(misaligned && cmd_read, ~eff_array, 0.U)
   val ma_st_array = Mux(misaligned && cmd_write, ~eff_array, 0.U)
-  val pf_ld_array = Mux(cmd_read, ~(Mux(hls.v && hls.x, (x_array & vx_array), (r_array & vr_array)) | ptw_ae_array), 0.U)
-  val pf_st_array = Mux(cmd_write_perms, ~((w_array & vw_array) | ptw_ae_array), 0.U)
-  val pf_inst_array = ~((x_array & vx_array) | ptw_ae_array)
+  val pf_ld_array = Mux(cmd_read, ~(Mux(hls.v && hls.x, x_array, r_array) | ptw_ae_array), 0.U)
+  val pf_st_array = Mux(cmd_write_perms, ~(w_array | ptw_ae_array), 0.U)
+  val pf_inst_array = ~(x_array | ptw_ae_array)
+  val pf_v_ld_array = Mux(cmd_read, ~Mux(hls.v && hls.x, vx_array, vr_array), 0.U)
+  val pf_v_st_array = Mux(cmd_write_perms, ~vw_array, 0.U)
+  val pf_v_inst_array = ~vx_array
 
   val tlb_hit = real_hits.orR
   val tlb_miss = vm_enabled && !bad_va && !tlb_hit
@@ -375,11 +378,18 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   val multipleHits = PopCountAtLeast(real_hits, 2)
 
   io.req.ready := state === s_ready
-  io.resp.pf.ld := (bad_va && cmd_read) || (pf_ld_array & hits).orR
-  io.resp.pf.st := (bad_va && cmd_write_perms) || (pf_st_array & hits).orR
-  io.resp.pf.inst := bad_va || (pf_inst_array & hits).orR
-  io.resp.pf.v := priv_v & (bad_guest_pa | (cmd_read & (~Mux(hls.v && hls.x, vx_array, vr_array) & hits).orR) | 
-    (cmd_write_perms & (~vw_array & hits).orR) | (~vx_array & hits).orR) & (io.resp.pf.ld | io.resp.pf.st | (io.resp.pf.inst & instruction))
+  val pf_ld = (pf_ld_array & hits).orR
+  val pf_v_ld = (pf_v_ld_array & hits).orR
+  val pf_st = (pf_st_array & hits).orR
+  val pf_v_st = (pf_v_st_array & hits).orR
+  val pf_inst = (pf_inst_array & hits).orR
+  val pf_v_inst = (pf_v_inst_array & hits).orR
+  io.resp.pf.ld := ((bad_va || bad_guest_pa) && cmd_read) || pf_ld || pf_v_ld
+  io.resp.pf.st := ((bad_va || bad_guest_pa) && cmd_write_perms) || pf_st || pf_v_st
+  io.resp.pf.inst := (bad_va || bad_guest_pa) || pf_inst || pf_v_inst
+  io.resp.pf.v := priv_v & (bad_guest_pa | (cmd_read & pf_v_ld & !pf_ld) | 
+    (cmd_write_perms & pf_v_st & !pf_st) | (instruction & pf_v_inst & !pf_inst)) & 
+    (io.resp.pf.ld | io.resp.pf.st | (io.resp.pf.inst & instruction))
   io.resp.pf.gpaddr := Mux(io.resp.pf.v, Cat(gppn, io.req.bits.vaddr(pgIdxBits-1, 0)), 0.U)
   io.resp.ae.ld := (ae_ld_array & hits).orR
   io.resp.ae.st := (ae_st_array & hits).orR
