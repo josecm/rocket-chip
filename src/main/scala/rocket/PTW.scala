@@ -141,6 +141,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
   val do_stage2 = Bool(usingHype) & Mux(arb.io.out.fire(), arb.io.out.bits.bits.do_stage2, r_req.do_stage2)
   val do_stage1 = !Bool(usingHype) || Mux(arb.io.out.fire(), arb.io.out.bits.bits.do_stage1, r_req.do_stage1)
   val do_both_stages = do_stage1 & do_stage2
+  val do_stage2_only = !do_stage1 & do_stage2
   val stage2 = RegInit(false.B)
   val s2_final = RegInit(false.B)
   val aux_count = Reg(UInt(width = log2Up(pgLevels)))
@@ -416,19 +417,19 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     val s1_ppns = (0 until pgLevels-1).map(i => Cat(pte.ppn(pte.ppn.getWidth-1, (pgLevels-i-1)*pgLevelBits), aux_pte.ppn((pgLevels-i-1)*pgLevelBits-1,0))) :+ pte.ppn
     val ppn_tmp = Mux(s2_final, s1_ppns(count) & superpage_masks(max_count), s1_ppns(count))
     val pte_temp = makePTE(ppn_tmp, aux_pte)
-    pte_temp.v := aux_pte.v & pte.v
     pte_temp
   }
 
   r_pte := OptimizationBarrier(
     Mux(mem_resp_valid & !traverse & do_both_stages & stage2, merged_pte,
+    Mux(mem_resp_valid & !traverse & do_stage2_only, makePTE(pte.ppn, fullPermPTE),
     Mux(mem_resp_valid, pte,
     Mux(l2_hit && !l2_error, l2_pte,
     Mux(state === s_fragment_superpage && !homogeneous, makePTE(fragmented_superpage_ppn, r_pte),
     Mux((state === s_req || state === s_switch) && pte_cache_hit, makePTE(pte_cache_data, l2_pte),
     Mux(state === s_switch, makePTE(io.dpath.hptbr.ppn, r_pte),
     Mux(arb.io.out.fire(), Mux(do_stage1, makePTE(ptbr.ppn, r_pte), makePTE(io.dpath.hptbr.ppn, r_pte)),
-    r_pte))))))))
+    r_pte)))))))))
 
   when (l2_hit && !l2_error) {
     assert(state === s_req || state === s_switch || state === s_wait1)
@@ -473,6 +474,10 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
 
     when(s2_final) {
       aux_pte := makePTE(aux_pte.ppn & superpage_masks(max_count), pte)
+    }
+
+    when(do_stage2_only) {
+      aux_pte := makePTE(r_req.addr, pte)
     }
 
     when(gae) { 
