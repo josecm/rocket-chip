@@ -345,7 +345,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     (id_xcpt1.ae.inst, UInt(Causes.fetch_access)),
     (id_illegal_insn,  Mux(id_virtual_insn, UInt(Causes.virtual_instruction), UInt(Causes.illegal_instruction)))))
 
-  ex_reg_gpaddr := id_xcpt0.pf.gpaddr
+  ex_reg_gpaddr := Mux(id_xcpt0.pf.v, id_xcpt0.pf.gpaddr, id_xcpt1.pf.gpaddr)
 
   val idCoverCauses = List(
     (CSR.debugTriggerCause, "DEBUG_TRIGGER"),
