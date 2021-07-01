@@ -477,7 +477,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     }
 
     when(do_stage2_only) {
-      aux_pte := makePTE(r_req.addr, pte)
+      aux_pte := makePTE(r_req.addr & superpage_masks(max_count), pte)
     }
 
     when(gae) { 
